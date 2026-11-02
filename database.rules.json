@@ -1,0 +1,133 @@
+{
+  "rules": {
+    "att": {
+      ".read": "auth != null && root.child('att/admins/' + auth.uid).exists()",
+      ".write": "auth != null && root.child('att/admins/' + auth.uid).exists()",
+
+      "admins": {
+        "$uid": {
+          ".read": "auth != null && auth.uid == $uid",
+          ".write": "auth != null && auth.uid == $uid && auth.token.email != null && !root.child('att/admins').exists()"
+        }
+      },
+      "adminRequests": {
+        "$uid": {
+          ".read": "auth != null && auth.uid == $uid",
+          ".write": "auth != null && auth.uid == $uid && auth.token.email != null"
+        }
+      },
+
+      "settings": { ".read": "auth != null" },
+      "staff": { ".read": "auth != null" },
+      "locks": { ".read": "auth != null" },
+      "notices": { ".read": "auth != null" },
+      "leaveCal": {
+        ".read": "auth != null",
+        "$sid": {
+          "$rid": {
+            ".write": "auth != null && root.child('att/deviceMap/' + auth.uid).val() == $sid && !data.exists()",
+            ".validate": "newData.child('status').val() == 'pending' || root.child('att/admins/' + auth.uid).exists()"
+          }
+        }
+      },
+
+      "staffPrivate": {
+        "$sid": { ".read": "auth != null && root.child('att/deviceMap/' + auth.uid).val() == $sid" }
+      },
+      "overrides": {
+        "$sid": {
+          ".read": "auth != null && root.child('att/deviceMap/' + auth.uid).val() == $sid",
+          "$date": {
+            ".validate": "newData.child('reason').isString() && newData.child('reason').val().length >= 3"
+          }
+        }
+      },
+      "snapshots": {
+        "$mk": {
+          "$sid": { ".read": "auth != null && root.child('att/deviceMap/' + auth.uid).val() == $sid" }
+        }
+      },
+      "adjust": {
+        "$sid": { ".read": "auth != null && root.child('att/deviceMap/' + auth.uid).val() == $sid" }
+      },
+
+      "deviceMap": {
+        "$uid": { ".read": "auth != null && auth.uid == $uid" }
+      },
+      "deviceRequests": {
+        "$uid": {
+          ".read": "auth != null && auth.uid == $uid",
+          ".write": "auth != null && auth.uid == $uid && !root.child('att/deviceMap/' + auth.uid).exists()"
+        }
+      },
+
+      "kiosks": {
+        "$uid": { ".read": "auth != null && auth.uid == $uid" }
+      },
+      "kioskRequests": {
+        "$uid": {
+          ".read": "auth != null && auth.uid == $uid",
+          ".write": "auth != null && auth.uid == $uid"
+        }
+      },
+      "kioskState": {
+        "$k": {
+          ".read": "auth != null && auth.uid == $k",
+          ".write": "auth != null && auth.uid == $k && root.child('att/kiosks/' + auth.uid).exists()",
+          ".validate": "newData.child('at').val() == now && newData.child('token').isString() && newData.child('token').val().length >= 16"
+        }
+      },
+
+      "claims": {
+        "$uid": {
+          ".read": "auth != null && auth.uid == $uid",
+          ".write": "auth != null && auth.uid == $uid && root.child('att/deviceMap/' + auth.uid).exists()",
+          ".validate": "newData.child('at').val() == now && newData.child('kiosk').isString() && root.child('att/kiosks/' + newData.child('kiosk').val()).exists() && now - root.child('att/kioskState/' + newData.child('kiosk').val() + '/at').val() < 45000 && (newData.child('token').val() == root.child('att/kioskState/' + newData.child('kiosk').val() + '/token').val() || newData.child('token').val() == root.child('att/kioskState/' + newData.child('kiosk').val() + '/prev').val()) && (root.child('att/settings/requireSameNetwork').val() != true || newData.child('ip').val() == root.child('att/kioskState/' + newData.child('kiosk').val() + '/ip').val())"
+        }
+      },
+
+      "punches": {
+        ".read": "auth != null && root.child('att/kiosks/' + auth.uid).exists()",
+        "$sid": {
+          ".read": "auth != null && root.child('att/deviceMap/' + auth.uid).val() == $sid",
+          ".indexOn": ["at"],
+          "$pid": {
+            ".write": "auth != null && !data.exists() && root.child('att/deviceMap/' + auth.uid).val() == $sid",
+            ".validate": "newData.hasChildren(['type', 'at', 'kiosk']) && newData.child('at').val() == now && newData.child('type').val().matches(/^(in|out|bout|bin)$/) && root.child('att/claims/' + auth.uid + '/kiosk').val() == newData.child('kiosk').val() && now - root.child('att/claims/' + auth.uid + '/at').val() < 180000"
+          }
+        }
+      },
+      "selfies": {
+        "$sid": {
+          "$pid": {
+            ".write": "auth != null && !data.exists() && root.child('att/deviceMap/' + auth.uid).val() == $sid",
+            ".validate": "newData.isString() && newData.val().length < 80000"
+          }
+        }
+      },
+
+      "requests": {
+        "$sid": {
+          ".read": "auth != null && root.child('att/deviceMap/' + auth.uid).val() == $sid",
+          "$rid": {
+            ".write": "auth != null && root.child('att/deviceMap/' + auth.uid).val() == $sid && !data.exists()",
+            ".validate": "newData.child('status').val() == 'pending' || root.child('att/admins/' + auth.uid).exists()"
+          }
+        }
+      },
+
+      "pushSubs": {
+        "$uid": {
+          ".read": "auth != null && auth.uid == $uid",
+          ".write": "auth != null && auth.uid == $uid"
+        }
+      },
+      "log": {
+        "$id": {
+          ".write": "auth != null && !data.exists()",
+          ".validate": "newData.hasChildren(['at', 'by', 'action'])"
+        }
+      }
+    }
+  }
+}

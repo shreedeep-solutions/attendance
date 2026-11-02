@@ -1,0 +1,21 @@
+{
+  "name": "Shreedeep Solutions — Attendance & Payroll",
+  "short_name": "SS Attendance",
+  "description": "Staff attendance, leave and salary for Shreedeep Solutions",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f6f3f1",
+  "theme_color": "#7a1f2b",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "My attendance", "url": "./index.html?staff" },
+    { "name": "Admin", "url": "./index.html?admin" },
+    { "name": "Office QR screen", "url": "./index.html?kiosk" }
+  ]
+}
