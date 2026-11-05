@@ -1,0 +1,37 @@
+name: Attendance jobs
+
+on:
+  schedule:
+    - cron: '*/10 3-14 * * *'   # every 10 min, 08:30–20:20 IST (alerts, reminders, payslip emails)
+    - cron: '30 16 * * *'       # 22:00 IST daily — last reminder for daily reports
+    - cron: '30 17 * * *'       # 23:00 IST daily — month-end report (last day), file cleanup
+    - cron: '0 18 28-31 * *'    # 23:30 IST backup run on month-end days
+  workflow_dispatch: {}          # "Run workflow" button for testing
+
+concurrency:
+  group: attendance-jobs
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install
+        working-directory: jobs
+        run: npm install --omit=dev --no-audit --no-fund
+      - name: Run jobs
+        working-directory: jobs
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          FIREBASE_DB_URL: ${{ secrets.FIREBASE_DB_URL }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          VAPID_PUBLIC: ${{ secrets.VAPID_PUBLIC }}
+          VAPID_PRIVATE: ${{ secrets.VAPID_PRIVATE }}
+          APP_URL: ${{ secrets.APP_URL }}
+        run: node run.mjs

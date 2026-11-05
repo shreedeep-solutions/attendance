@@ -6,16 +6,51 @@
   "scope": "./",
   "display": "standalone",
   "orientation": "any",
-  "background_color": "#f6f3f1",
-  "theme_color": "#7a1f2b",
+  "background_color": "#f2f2f7",
+  "theme_color": "#f2f2f7",
   "icons": [
-    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
-    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
-    { "src": "icons/icon-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-maskable.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
   ],
   "shortcuts": [
-    { "name": "My attendance", "url": "./index.html?staff" },
-    { "name": "Admin", "url": "./index.html?admin" },
-    { "name": "Office QR screen", "url": "./index.html?kiosk" }
-  ]
+    {
+      "name": "My attendance",
+      "url": "./index.html?staff"
+    },
+    {
+      "name": "Admin",
+      "url": "./index.html?admin"
+    },
+    {
+      "name": "Office QR screen",
+      "url": "./index.html?kiosk"
+    }
+  ],
+  "id": "./index.html",
+  "display_override": [
+    "standalone",
+    "minimal-ui"
+  ],
+  "prefer_related_applications": false,
+  "categories": [
+    "business",
+    "productivity"
+  ],
+  "lang": "en-IN"
 }

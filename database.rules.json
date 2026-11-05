@@ -97,6 +97,28 @@
           }
         }
       },
+      "reports": {
+        "$sid": {
+          ".read": "auth != null && root.child('att/deviceMap/' + auth.uid).val() == $sid",
+          "$date": {
+            ".write": "auth != null && root.child('att/deviceMap/' + auth.uid).val() == $sid",
+            ".validate": "$date.matches(/^20[0-9][0-9]-[01][0-9]-[0-3][0-9]$/)",
+            "pdf": { ".validate": "newData.child('at').val() == now && newData.child('fid').isString() && newData.child('name').isString()" },
+            "photos": { "$p": { ".validate": "newData.child('at').val() == now" } },
+            "shared": { "$x": { ".validate": "!data.exists() && newData.val() == now" } },
+            "$other": { ".validate": false }
+          }
+        }
+      },
+      "reportFiles": {
+        "$sid": {
+          ".read": "auth != null && root.child('att/deviceMap/' + auth.uid).val() == $sid",
+          "$fid": {
+            ".write": "auth != null && root.child('att/deviceMap/' + auth.uid).val() == $sid && (!data.exists() || !newData.exists())",
+            ".validate": "newData.isString() && newData.val().length < 4200000"
+          }
+        }
+      },
       "selfies": {
         "$sid": {
           "$pid": {

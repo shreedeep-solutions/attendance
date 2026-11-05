@@ -1,9 +1,10 @@
 /* Service worker — offline app shell + push notifications */
-const CACHE = 'ss-att-v2.0';
-const SHELL = ['./', './index.html', './app.js', './engine.js', './manifest.json', './icons/icon-192.png', './icons/icon-512.png'];
+const CACHE = 'ss-att-v3.0';
+const SHELL = ['./', './index.html', './app.js', './engine.js', './manifest.json', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
 const CDN = /gstatic\.com\/firebasejs|cdn\.jsdelivr\.net|cdn\.sheetjs\.com/;
 
-self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())); });
+// Each file is cached on its own so one failure can never block installation
+self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => Promise.all(SHELL.map(u => c.add(u).catch(() => null)))).then(() => self.skipWaiting())); });
 self.addEventListener('activate', e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim())); });
 
 self.addEventListener('fetch', e => {

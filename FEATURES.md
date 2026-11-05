@@ -1,4 +1,4 @@
-# Attendance & Payroll — 100 Feature Ideas (status after v2.0)
+# Attendance & Payroll — 100 Feature Ideas (status after v3.0)
 
 ✅ = built (v1.0 + the 50 picked for v2.0). Unticked items remain ideas for later.
 
@@ -20,15 +20,15 @@
 15. ✅ Early-leaving flag with reason when Out is before office end
 
 ## B. Leave management (16–30)
-16. ✅ Paid leave balance with monthly credit, carry forward, April reset
-17. ✅ PL beyond balance automatically becomes LOP
-18. ✅ Half day + half paid leave (HPL)
+16. ~~Paid leave balance with monthly credit, carry forward, April reset~~ — *removed in v3 (no paid leave)*
+17. ~~PL beyond balance automatically becomes LOP~~ — *removed in v3 (no paid leave)*
+18. ~~Half day + half paid leave (HPL)~~ — *removed in v3 (no paid leave)*
 19. ✅ Online leave application by staff (dates, type, reason)
 20. ✅ Leave approval / rejection by admin with comment
 21. ✅ Leave auto-fills the register once approved
 22. Separate leave types: Casual, Sick, Earned, Comp-off, Maternity
 23. ✅ Sick leave beyond 2 days needs a medical note upload
-24. ✅ Compensatory off earned for working on a Tuesday / holiday
+24. ~~Compensatory off earned for working on a Tuesday / holiday~~ — *removed in v3 (no paid leave)*
 25. Sandwich rule (leave on both sides of a weekly off counts the off too) — optional
 26. Leave encashment at year end
 27. ✅ Blackout dates (no leave allowed near audit / ITR deadlines)
@@ -117,3 +117,11 @@
 98. ✅ Dark mode
 99. ✅ Holiday list import (Maharashtra public holidays) in one click
 100. ✅ Merge into the planned unified Shreedeep Solutions portal (shared login with TaskFlow / HabitFlow) — *step-by-step plan in README*
+
+
+## Added in v3.0
+- Daily report (PDF + photos) required for the day to count, deadline 11:59 pm, one-tap share to the WhatsApp group
+- Admin Daily Reports page, report compliance analytics, 7 PM / 10 PM reminders, next-morning missed-report alert
+- macOS / iOS redesign; screens keep position on updates; install fixed
+
+See FEATURES-NEXT.md for ideas 101–200.
