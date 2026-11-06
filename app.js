@@ -1,9 +1,9 @@
 /* =====================================================================
-   Shreedeep Solutions — Attendance & Payroll  app.js  v2.0
+   Shreedeep Solutions — Attendance & Payroll  app.js  v3.1
    Modes: admin (partners), staff (own phone), kiosk (office PC)
    ===================================================================== */
 'use strict';
-const VERSION = '3.0';
+const VERSION = '3.1';
 const ROOT = 'att';
 const EG = window.Engine;
 const { pad, r2, istDate, istHM, addDays, addMonths, daysIn, mkOf, dsDow, toMin, arr } = EG;
@@ -39,6 +39,42 @@ function distM(lat1, lon1, lat2, lon2) {
   const h = Math.sin(dLat / 2) ** 2 + Math.cos(t(lat1)) * Math.cos(t(lat2)) * Math.sin(dLon / 2) ** 2;
   return Math.round(2 * R * Math.asin(Math.sqrt(h)));
 }
+/* Only real images may be shown (data from staff phones is never trusted) */
+const safeImg = d => (typeof d === 'string' && d.length < 6e6 && /^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(d)) ? d : '';
+/* Open stored files with a FORCED type so a fake "PDF" can never run as a web page */
+function openDataURL(d, name, forceType) {
+  if (typeof d !== 'string' || !d.startsWith('data:')) return toast('File is damaged');
+  const head = d.slice(0, d.indexOf(',')); const b64 = d.slice(d.indexOf(',') + 1);
+  let type = forceType || ((head.match(/data:([^;]+)/) || [])[1] || '');
+  if (!/^(application\/pdf|image\/(png|jpe?g|webp|gif))$/.test(type)) type = 'application/octet-stream';
+  let bin; try { bin = atob(b64); } catch (e) { return toast('File is damaged'); }
+  const u8 = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  if (type === 'application/pdf' && !(u8[0] === 0x25 && u8[1] === 0x50 && u8[2] === 0x44 && u8[3] === 0x46)) type = 'application/octet-stream';
+  const url = URL.createObjectURL(new Blob([u8], { type }));
+  if (type === 'application/octet-stream') { const a = document.createElement('a'); a.href = url; a.download = name || 'file'; a.click(); return; }
+  const w = window.open(url, '_blank'); if (!w) { const a = document.createElement('a'); a.href = url; a.download = name || 'file'; a.click(); }
+}
+/* In-app text prompt (replaces the browser's prompt box) */
+function askText(title, placeholder) {
+  return new Promise(res => {
+    openModal(`<h3>${esc(title)}</h3><textarea id="ask_t" rows="3" style="width:100%" placeholder="${esc(placeholder || '')}"></textarea>
+      <div style="display:grid;gap:8px;margin-top:12px"><button class="btn big" data-act="askOk">OK</button><button class="btn big g" data-act="askNo">Cancel</button></div>`, { sticky: true });
+    ACT.askOk = () => { const v = val('ask_t'); closeModal(); res(v); };
+    ACT.askNo = () => { closeModal(); res(null); };
+  });
+}
+/* In-app yes/no sheet (replaces the browser's confirm box) */
+function askYes(msg, yesLabel, danger) {
+  return new Promise(res => {
+    openModal(`<p style="font-size:16px;line-height:1.45;margin:4px 0 16px">${esc(msg).replace(/\n/g, '<br>')}</p>
+      <div style="display:grid;gap:8px"><button class="btn big ${danger === false ? '' : 'r'}" data-act="askYesOk">${esc(yesLabel || 'Yes')}</button><button class="btn big g" data-act="askYesNo">Cancel</button></div>`, { sticky: true, onClose: () => res(false) });
+    ACT.askYesOk = () => { APP.modal.onClose = null; closeModal(); res(true); };
+    ACT.askYesNo = () => { APP.modal.onClose = null; closeModal(); res(false); };
+  });
+}
+/* Phone layout? (admin screens switch to card lists) */
+const PH = () => matchMedia('(max-width: 700px)').matches;
+matchMedia('(max-width: 700px)').addEventListener('change', () => { if (APP.mode) render(); });
 function loadScript(src) { return new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = () => rej(new Error('Could not load ' + src)); document.head.appendChild(s); }); }
 function randToken(n) { const a = new Uint8Array(n || 18); crypto.getRandomValues(a); return Array.from(a, b => ('0' + b.toString(16)).slice(-2)).join(''); }
 async function getIP() {
@@ -47,7 +83,7 @@ async function getIP() {
   try { return await tryF('https://ipv4.icanhazip.com', false); } catch (e) { }
   return '';
 }
-function fileToDataURL(file, maxW, quality) {
+function fileToDataURL(file, maxW, quality, forceJpeg) {
   return new Promise((res, rej) => {
     const rd = new FileReader();
     rd.onerror = () => rej(new Error('Could not read file'));
@@ -56,7 +92,7 @@ function fileToDataURL(file, maxW, quality) {
       const img = new Image(); img.onload = () => {
         const sc = Math.min(1, maxW / img.width); const c = document.createElement('canvas'); c.width = Math.round(img.width * sc); c.height = Math.round(img.height * sc);
         const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.drawImage(img, 0, 0, c.width, c.height);
-        res(c.toDataURL(file.type === 'image/png' ? 'image/png' : 'image/jpeg', quality || 0.7));
+        res(c.toDataURL(file.type === 'image/png' && !forceJpeg ? 'image/png' : 'image/jpeg', quality || 0.7));
       }; img.onerror = () => res(rd.result); img.src = rd.result;
     };
     rd.readAsDataURL(file);
@@ -107,9 +143,12 @@ function sub(path, target, query) {
   r.on('value', cb, err => { console.warn('read denied', path, err.message); });
   SUBS.push(() => { r.off('value', cb); delete SUBCACHE[key]; });
 }
-function unsubAll() { SUBS.forEach(f => { try { f(); } catch (e) { } }); SUBS = []; DATA = {}; }
+/* Listen to a path outside DATA (auth/device checks) — tracked so switching mode stops it */
+function onRef(path, cb, err) { const r = ref(path); r.on('value', cb, err || (e => console.warn('read denied', path, e.message))); SUBS.push(() => r.off('value', cb)); }
+function onAuth(cb) { const off = FB.auth.onAuthStateChanged(cb); SUBS.push(() => { try { off(); } catch (e) { } }); }
+function unsubAll() { SUBS.forEach(f => { try { f(); } catch (e) { } }); SUBS = []; DATA = {}; Object.keys(SUBCACHE).forEach(k => delete SUBCACHE[k]); }
 async function log(action, detail) {
-  try { await ref('log').push({ at: TS(), by: (APP.me && APP.me.name) || APP.mode || 'system', action, detail: String(detail || '').slice(0, 500) }); } catch (e) { }
+  try { await ref('log').push({ at: TS(), uid: FB.auth.currentUser ? FB.auth.currentUser.uid : '', by: (APP.me && APP.me.name) || APP.mode || 'system', action: String(action).slice(0, 40), detail: String(detail || '').slice(0, 500) }); } catch (e) { }
 }
 
 /* ---------------- render loop ---------------- */
@@ -344,13 +383,16 @@ const staffIds = (incInactive) => Object.entries(DATA.staff || {}).filter(([, u]
   .sort((a, b) => String(a[1].empId || a[1].name).localeCompare(String(b[1].empId || b[1].name))).map(([id]) => id);
 const sName = sid => ((DATA.staff || {})[sid] || {}).name || '(removed)';
 function monthPicker(extra) {
-  return `<button class="btn g s" data-act="monShift" data-n="-1">◀</button><input type="month" value="${APP.month}" data-chg="pickMonth"><button class="btn g s" data-act="monShift" data-n="1">▶</button>${extra || ''}`;
+  return `<span class="dp"><button class="btn g s" data-act="monShift" data-n="-1" aria-label="Previous month">‹</button><input type="month" value="${APP.month}" data-chg="pickMonth"><button class="btn g s" data-act="monShift" data-n="1" aria-label="Next month">›</button></span>${extra || ''}`;
 }
 ACT.monShift = b => { APP.month = addMonths(APP.month, +b.dataset.n); render(); };
 CHG.pickMonth = el => { if (el.value) { APP.month = el.value; render(); } };
 ACT.dayShift = b => { APP.date = addDays(APP.date, +b.dataset.n); render(); };
 CHG.pickDate = el => { if (el.value) { APP.date = el.value; render(); } };
 ACT.goToday = () => { APP.date = istDate(nowMs()); render(); };
+function dayPicker() {
+  return `<span class="dp"><button class="btn g s" data-act="dayShift" data-n="-1" aria-label="Previous day">‹</button><input type="date" value="${APP.date}" data-chg="pickDate"><button class="btn g s" data-act="dayShift" data-n="1" aria-label="Next day">›</button></span><button class="btn o s" data-act="goToday">Today</button>`;
+}
 function settingsDefaults() { return Object.assign({}, EG.DEFAULTS, DATA.settings || {}); }
 
 /* ---------------- landing / routing ---------------- */
@@ -391,10 +433,11 @@ const ROTATE_MS = 15000;
 
 async function bootKiosk() {
   render();
-  FB.auth.onAuthStateChanged(async u => {
+  SUBS.push(() => stopKioskLoop());
+  onAuth(async u => {
     if (!u) { try { await FB.auth.signInAnonymously(); } catch (e) { KIOSK.lastErr = 'Sign-in failed: ' + e.message + ' (enable Anonymous sign-in in Firebase)'; render(); } return; }
     APP.uid = u.uid;
-    ref('kiosks/' + u.uid).on('value', s => {
+    onRef('kiosks/' + u.uid, s => {
       KIOSK.approved = !!s.val(); KIOSK.name = (s.val() || {}).name || 'Office';
       if (KIOSK.approved) startKioskLoop(); else { stopKioskLoop(); requestKiosk(); }
       render();
@@ -412,9 +455,13 @@ function startKioskLoop() {
   try { if (navigator.wakeLock) navigator.wakeLock.request('screen').then(w => { KIOSK.wake = w; }).catch(() => { }); } catch (e) { }
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && navigator.wakeLock && APP.mode === 'kiosk') navigator.wakeLock.request('screen').catch(() => { }); });
 }
-function stopKioskLoop() { clearInterval(KIOSK.timer); KIOSK.timer = null; }
+function stopKioskLoop() { clearInterval(KIOSK.timer); KIOSK.timer = null; KIOSK.svg = ''; }
 async function rotate() {
+  if (KIOSK.busy || !KIOSK.timer) return; KIOSK.busy = true;
   KIOSK.nextAt = Date.now() + ROTATE_MS;
+  try { await rotateInner(); } finally { KIOSK.busy = false; }
+}
+async function rotateInner() {
   if (!KIOSK.ip || Date.now() - KIOSK.ipAt > 300000) { const ip = await getIP(); if (ip) { KIOSK.ip = ip; KIOSK.ipAt = Date.now(); } }
   const tok = randToken(18);
   try {
@@ -436,7 +483,7 @@ function renderKiosk() {
     app.innerHTML = `<div class="kiosk"><div class="card center" style="text-align:center">
       <h1>Office QR screen</h1>
       ${KIOSK.lastErr ? `<div class="err">${esc(KIOSK.lastErr)}</div>` : ''}
-      ${APP.uid ? `<p>Ask an admin to open <b>Devices</b> and approve this screen.</p><p style="font-size:40px;font-weight:800;letter-spacing:4px;color:var(--m2)">${APP.uid.slice(-6).toUpperCase()}</p><p class="muted">Keep this page open. It starts automatically once approved.</p>` : '<p>Connecting…</p>'}
+      ${APP.uid ? `<p>Ask an admin to open <b>Devices</b> and approve this screen.</p><p style="font-size:40px;font-weight:800;letter-spacing:4px;color:var(--tint)">${APP.uid.slice(-6).toUpperCase()}</p><p class="muted">Keep this page open. It starts automatically once approved.</p>` : '<p>Connecting…</p>'}
       <p><a href="#" data-act="switchMode">Not the office PC? Go back</a></p></div></div>`;
     return;
   }
@@ -456,6 +503,7 @@ function renderKiosk() {
     <div style="text-align:center"><div class="muted" style="font-size:16px">${esc((DATA.settings || {}).company || 'Shreedeep Solutions')} · ${fmtDateDow(t)}</div>
     <div class="clock" id="kclock">${istHM(nowMs())}</div></div>
     ${KIOSK.lastErr ? `<div class="err">${esc(KIOSK.lastErr)}</div>` : ''}
+    ${!KIOSK.ip && (DATA.settings || {}).requireSameNetwork !== false ? '<div class="err">Cannot detect this office internet address — staff check-in will be refused until it is detected. Check the internet connection.</div>' : ''}
     <div class="qr">${KIOSK.svg || '<div style="width:300px;height:300px;display:flex;align-items:center;justify-content:center">Preparing…</div>'}</div>
     <div class="prog"><div id="kprog" style="width:100%"></div></div>
     <div style="font-size:18px;font-weight:700">Scan with your phone to check in / out</div>
@@ -475,13 +523,23 @@ const ST8 = { mapped: null, req: null, busy: false, pendingP: null, upl: '', thu
 async function bootStaff() {
   if (location.hash.startsWith('#p=')) { ST8.pendingP = location.hash.slice(3); history.replaceState(null, '', location.pathname + location.search); }
   render();
-  FB.auth.onAuthStateChanged(async u => {
+  ST8.subFor = null; ST8.reqSub = false; ST8.err = '';
+  onAuth(async u => {
     if (!u) { try { await FB.auth.signInAnonymously(); } catch (e) { ST8.err = 'Sign-in failed: ' + e.message; render(); } return; }
     APP.uid = u.uid;
-    ref('deviceMap/' + u.uid).on('value', s => {
+    onRef('deviceMap/' + u.uid, s => {
       const sid = s.val();
-      if (sid && sid !== APP.sid) { APP.sid = sid; ST8.mapped = true; subscribeStaff(sid); if (ST8.pendingP) { const p = ST8.pendingP; ST8.pendingP = null; setTimeout(() => punchFlow(p), 400); } }
-      else if (!sid) { ST8.mapped = false; APP.sid = null; sub('staff'); ref('deviceRequests/' + u.uid).on('value', r => { ST8.req = r.val(); render(); }); }
+      if (sid) {
+        if (ST8.subFor !== sid) { // first approval, or phone moved to another person → fresh data
+          if (ST8.subFor) { location.reload(); return; }
+          ST8.subFor = sid; APP.sid = sid; ST8.mapped = true; subscribeStaff(sid);
+          if (ST8.pendingP) { const p = ST8.pendingP; ST8.pendingP = null; setTimeout(() => punchFlow(p), 600); }
+        }
+      } else {
+        if (ST8.subFor) { location.reload(); return; } // access revoked → drop all cached personal data
+        ST8.mapped = false; APP.sid = null;
+        if (!ST8.reqSub) { ST8.reqSub = true; sub('staff'); onRef('deviceRequests/' + u.uid, r => { ST8.req = r.val(); render(); }); }
+      }
       render();
     }, err => { ST8.err = err.message; render(); });
   });
@@ -489,7 +547,8 @@ async function bootStaff() {
 function subscribeStaff(sid) {
   ['settings', 'staff', 'locks', 'notices', 'leaveCal'].forEach(p => sub(p));
   ['staffPrivate', 'punches', 'overrides', 'requests', 'adjust', 'reports'].forEach(n => sub(n + '/' + sid));
-  ref('locks').on('value', s => { Object.keys(s.val() || {}).forEach(mk => { if (!ST8['snap' + mk]) { ST8['snap' + mk] = 1; sub(`snapshots/${mk}/${sid}`); } }); });
+  ST8.snaps = {};
+  onRef('locks', s => { Object.keys(s.val() || {}).forEach(mk => { if (!ST8.snaps[mk]) { ST8.snaps[mk] = 1; sub(`snapshots/${mk}/${sid}`); } }); });
 }
 
 const STAFF_TABS = [['home', 'clock', 'Today'], ['report', 'doc', 'Report'], ['leave', 'leave', 'Leave'], ['cal', 'cal', 'Calendar'], ['more', 'more', 'More']];
@@ -610,7 +669,7 @@ async function punchFlow(p) {
     else if (lastType === 'out') options = [['in', 'Check in again (came back)', 'gr']];
     else options = [['out', 'Check out', 'r'], ['bout', 'Start break', 'o']];
     const type = await new Promise(res => {
-      openModal(`<div style="text-align:center">${selfie ? `<img src="${selfie}" style="width:96px;height:96px;border-radius:50%;object-fit:cover">` : ''}<h3 style="margin-top:8px">${esc(APP.me.name)}</h3><div class="muted">${istHM(nowMs())}</div></div>
+      openModal(`<div style="text-align:center">${safeImg(selfie) ? `<img src="${safeImg(selfie)}" style="width:96px;height:96px;border-radius:50%;object-fit:cover">` : ''}<h3 style="margin-top:8px">${esc(APP.me.name)}</h3><div class="muted">${istHM(nowMs())}</div></div>
         <div style="display:grid;gap:10px;margin-top:14px">${options.map(o => `<button class="btn big ${o[2]}" data-act="pickPunch" data-t="${o[0]}">${o[1]}</button>`).join('')}
         <button class="btn big g" data-act="pickPunch" data-t="">Cancel</button></div>`, { sticky: true });
       ACT.pickPunch = b => { closeModal(); res(b.dataset.t); };
@@ -676,7 +735,7 @@ function sReport() {
   AFTER.push(preloadReportFiles);
   const photos = Object.entries(rp.photos || {}).sort((a, b) => (a[1].at || 0) - (b[1].at || 0));
   const max = ST8.thumbsOpen ? photos.length : 7;
-  const thumbs = photos.slice(0, max).map(([fid]) => `<button class="th" data-act="viewPhoto" data-fid="${fid}">${FILES[fid] ? `<img src="${FILES[fid]}" alt="">` : ''}</button>`).join('')
+  const thumbs = photos.slice(0, max).map(([fid]) => `<button class="th" data-act="viewPhoto" data-fid="${fid}">${safeImg(FILES[fid]) ? `<img src="${safeImg(FILES[fid])}" alt="">` : ''}</button>`).join('')
     + (photos.length > max ? `<button class="th more" data-act="thumbsMore">+${photos.length - max}</button>` : '');
   const can = !!(navigator.canShare && navigator.share);
   const ready = rs.uploaded;
@@ -731,7 +790,7 @@ CHG.repPhotos = async el => {
     if (!/^image\//.test(f.type)) continue;
     n++; ST8.upl = `Uploading photo ${n} of ${files.length}…`; render();
     try {
-      const data = await fileToDataURL(f, 1280, 0.72);
+      const data = await fileToDataURL(f, 1280, 0.72, true);
       const fid = dbPushKey('reportFiles/' + APP.sid);
       await dbSet(`reportFiles/${APP.sid}/${fid}`, data); FILES[fid] = data; IDB.put(fid, data);
       await dbSet(`reports/${APP.sid}/${ds}/photos/${fid}`, { at: TS(), kb: Math.round(data.length * 0.75 / 1024) });
@@ -741,7 +800,7 @@ CHG.repPhotos = async el => {
 };
 ACT.viewPhoto = b => {
   const fid = b.dataset.fid;
-  openModal(`<div style="text-align:center">${FILES[fid] ? `<img src="${FILES[fid]}" style="max-width:100%;max-height:65vh;border-radius:12px">` : '<p class="muted">Loading…</p>'}</div>
+  openModal(`<div style="text-align:center">${safeImg(FILES[fid]) ? `<img src="${safeImg(FILES[fid])}" style="max-width:100%;max-height:65vh;border-radius:12px">` : '<p class="muted">Loading…</p>'}</div>
    <div style="display:grid;gap:8px;margin-top:12px"><button class="btn big r" data-act="delPhoto" data-fid="${fid}">Remove photo</button><button class="btn big g" data-act="closeModal">Close</button></div>`);
 };
 ACT.delPhoto = async b => {
@@ -840,7 +899,7 @@ ACT.applyLeave = async () => {
   if (type !== 'SL' && E.inBlackout(from, to).length) return toast('Leave is not allowed in that busy period. Talk to admin.', 4500);
   const f = $('#l_file').files[0]; let attachment = '';
   if (type === 'SL' && days > (+E.S.sickNoteDays || 2) && !f) return toast(`Sick leave over ${E.S.sickNoteDays} days needs a medical note`);
-  if (f) { if (f.size > 3e6) return toast('File too large (max 3 MB)'); attachment = await fileToDataURL(f, 1100, 0.6); if (attachment.length > 450000) return toast('File still too large — take a clearer photo'); }
+  if (f) { if (f.size > 3e6) return toast('File too large (max 3 MB)'); attachment = await fileToDataURL(f, 1100, 0.6, true); if (attachment.length > 450000) return toast(/pdf/i.test(f.type) ? 'PDF too large (max about 300 KB) — send a photo of the note instead' : 'Photo still too large — try again'); }
   const id = dbPushKey('requests/' + APP.sid);
   const req = { kind: 'leave', leaveType: type, from, to, half: !!half, days, reason, status: 'pending', at: TS() };
   if (attachment) req.attachment = attachment;
@@ -899,7 +958,7 @@ const AD = { state: 'loading', err: '', setupNeeded: false };
 
 async function bootAdmin() {
   render();
-  FB.auth.onAuthStateChanged(async u => {
+  onAuth(async u => {
     if (!u || u.isAnonymous) { AD.state = 'login'; APP.me = null; render(); return; }
     APP.uid = u.uid; AD.state = 'checking'; render();
     try {
@@ -916,7 +975,7 @@ async function bootAdmin() {
       ['settings', 'staff', 'staffPrivate', 'punches', 'overrides', 'requests', 'adjust', 'locks', 'snapshots', 'leaveCal', 'deviceMap', 'deviceRequests',
         'kiosks', 'kioskRequests', 'admins', 'reports', 'adminRequests', 'notices', 'pendingOverrides', 'assets', 'jobState'].forEach(p => sub(p));
       sub('log', ['log'], r => r.orderByChild('at').limitToLast(400));
-      ref('admins/' + u.uid).on('value', s => { if (!s.val()) { toast('Admin access removed'); FB.auth.signOut(); } else APP.me = s.val(); });
+      onRef('admins/' + u.uid, s => { if (!s.val()) { toast('Admin access removed'); FB.auth.signOut(); } else APP.me = s.val(); });
       startIdleWatch(); pollKiosk();
       render();
     } catch (e) { AD.err = e.message; AD.state = 'login'; render(); }
@@ -1123,7 +1182,7 @@ function drawCharts() {
 /* ---------- TODAY (live, any date) ---------- */
 VIEWS.today = function () {
   const ds = APP.date; const ids = staffIds(true).filter(id => DATA.staff[id].active !== false || (E.day(id, ds).punches.length));
-  return `<div class="bar"><h2>Today</h2><button class="btn g s" data-act="dayShift" data-n="-1">◀</button><input type="date" value="${ds}" data-chg="pickDate"><button class="btn g s" data-act="dayShift" data-n="1">▶</button><button class="btn o s" data-act="goToday">Today</button></div>
+  return `<div class="bar"><h2>Today</h2>${dayPicker()}</div>
   <div class="muted" style="margin:-6px 0 10px">${fmtDateDow(ds)} ${E.dayDefault(ds) === 'HO' ? '· Holiday: ' + esc(E.holidayName(ds)) : E.dayDefault(ds) === 'WO' ? '· Weekly off' : ''} ${E.isLocked(mkOf(ds)) ? '<span class="locked">MONTH LOCKED</span>' : ''}</div>
   <div class="tw"><table><tr><th>Staff</th><th>Status</th><th>In</th><th>Out</th><th>Hours</th><th>Break</th><th>Daily report</th><th>Scans (tap 📷 for selfie)</th><th>Notes</th><th></th></tr>
   ${ids.map(sid => { const r = E.day(sid, ds); return `<tr><td><b>${esc(sName(sid))}</b></td><td>${codeTag(r.code)} <span class="muted">${esc(codeLabel(r.code))}</span></td>
@@ -1139,7 +1198,7 @@ ACT.selfie = async b => {
   openModal('<h3>Selfie</h3><p>Loading…</p>');
   const img = await dbOnce(`selfies/${b.dataset.sid}/${b.dataset.pid}`);
   const p = (((DATA.punches || {})[b.dataset.sid]) || {})[b.dataset.pid] || {};
-  openModal(`<h3>${esc(sName(b.dataset.sid))} — ${fmtDT(p.at)}</h3>${img ? `<img src="${img}" style="width:100%;max-width:360px;border-radius:12px">` : '<p class="muted">No selfie stored (may be cleaned up after 90 days).</p>'}
+  openModal(`<h3>${esc(sName(b.dataset.sid))} — ${fmtDT(p.at)}</h3>${safeImg(img) ? `<img src="${safeImg(img)}" style="width:100%;max-width:360px;border-radius:12px">` : '<p class="muted">No selfie stored (may be cleaned up after 90 days).</p>'}
    <p class="muted">Network ${esc(p.ip || '?')} · ${p.dist != null ? p.dist + ' m from office' : 'no GPS'}${p.acc ? ' (±' + p.acc + ' m)' : ''} · ${esc(p.dev || '')}</p><button class="btn g" data-act="closeModal">Close</button>`);
 };
 
@@ -1195,6 +1254,7 @@ ACT.saveOverride = async b => {
   const sid = b.dataset.sid, ds = b.dataset.ds;
   const status = val('o_status'), inT = val('o_in'), outT = val('o_out'), reason = val('o_reason');
   if (reason.length < 3) return toast('Reason is required');
+  if (E.isLocked(mkOf(ds))) return toast('Month is locked — unlock it in Salary first');
   const skip = val('o_skip');
   if (!status && !inT && !outT && !skip) return toast('Choose a status, enter times or accept without report');
   if (inT && outT && toMin(outT) <= toMin(inT)) return toast('Out must be after In');
@@ -1213,18 +1273,18 @@ ACT.saveOverride = async b => {
   toast('Correction saved');
 };
 ACT.removeOverride = async b => {
-  const sid = b.dataset.sid, ds = b.dataset.ds; const reason = prompt('Reason for removing the correction?'); if (!reason || reason.length < 3) return;
+  const sid = b.dataset.sid, ds = b.dataset.ds; const reason = await askText('Reason for removing the correction', 'e.g. Entered by mistake'); if (!reason || reason.length < 3) return toast('A reason is required');
+  const st = settingsDefaults(); const old = ds < addDays(E.today, -(+st.oldEditDays || 0));
+  if (old && st.secondAdminApproval && Object.keys(DATA.admins || {}).filter(u => u !== APP.uid).length) {
+    await dbSet('pendingOverrides/' + dbPushKey('pendingOverrides'), { sid, ds, remove: true, data: {}, reason, by: APP.me.name, byUid: APP.uid, at: TS() });
+    await log('override-remove-pending', `${sName(sid)} · ${ds} · ${reason} (needs 2nd admin)`); closeModal(); return toast('Sent to the other admin for approval', 4000);
+  }
   await dbSet(`overrides/${sid}/${ds}`, null); await log('override-removed', `${sName(sid)} · ${ds} · ${reason}`); toast('Removed');
 };
 
 /* ---------- DAILY REPORTS viewer (admin) ---------- */
 const AFILES = {};
 async function adminFile(sid, fid) { if (AFILES[fid]) return AFILES[fid]; const d = await dbOnce(`reportFiles/${sid}/${fid}`); if (d) AFILES[fid] = d; return d; }
-function openDataURL(d, name) {
-  const [h, b64] = d.split(','); const type = (h.match(/data:([^;]+)/) || [])[1]; const bin = atob(b64); const u8 = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
-  const url = URL.createObjectURL(new Blob([u8], { type })); const w = window.open(url, '_blank');
-  if (!w) { const a = document.createElement('a'); a.href = url; a.download = name || 'file'; a.click(); }
-}
 VIEWS.dailyrep = function () {
   const ds = APP.date; const ids = staffIds();
   const need = []; const rows = ids.map(sid => {
@@ -1234,18 +1294,18 @@ VIEWS.dailyrep = function () {
     return `<div class="card"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px"><b style="font-size:16px">${esc(sName(sid))}</b>${codeTag(r.code)}
       <span class="muted">${r.in ? 'In ' + r.in + (r.out ? ' · Out ' + r.out : '') : 'No check-in'}</span><span style="flex:1"></span>${r.in ? reportChip(r.report, r) : ''}</div>
       ${rp.pdf ? `<div class="filerow" style="margin-bottom:8px"><span class="ic">PDF</span><div style="flex:1;min-width:0"><div style="font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(rp.pdf.name)}</div><div class="muted">uploaded ${rp.pdf.at ? fmtDT(rp.pdf.at) : ''}</div></div><button class="btn s g" data-act="openPdf" data-sid="${sid}" data-fid="${rp.pdf.fid}" data-name="${esc(rp.pdf.name)}">Open</button></div>` : ''}
-      ${photos.length ? `<div class="thumbs">${photos.map(fid => `<button class="th" data-act="adminPhoto" data-sid="${sid}" data-fid="${fid}">${AFILES[fid] ? `<img src="${AFILES[fid]}">` : ''}</button>`).join('')}</div>` : ''}
+      ${photos.length ? `<div class="thumbs">${photos.map(fid => `<button class="th" data-act="adminPhoto" data-sid="${sid}" data-fid="${fid}">${safeImg(AFILES[fid]) ? `<img src="${safeImg(AFILES[fid])}">` : ''}</button>`).join('')}</div>` : ''}
       ${!rp.pdf && !photos.length ? '<div class="muted">Nothing uploaded.</div>' : ''}</div>`;
   }).join('');
   if (need.length) AFTER.push(() => { Promise.all(need.slice(0, 40).map(([sid, fid]) => adminFile(sid, fid))).then(() => { if (APP.view === 'dailyrep') scheduleRender(); }); });
   const sent = ids.filter(sid => E.day(sid, ds).report.ok).length, worked = ids.filter(sid => E.day(sid, ds).in).length;
-  return `<div class="bar"><h2>Daily Reports</h2><button class="btn g s" data-act="dayShift" data-n="-1">‹</button><input type="date" value="${ds}" data-chg="pickDate"><button class="btn g s" data-act="dayShift" data-n="1">›</button><button class="btn o s" data-act="goToday">Today</button></div>
+  return `<div class="bar"><h2>Daily Reports</h2>${dayPicker()}</div>
    <div class="muted" style="margin:-8px 0 14px">${fmtDateDow(ds)} · ${sent} of ${worked} who worked have sent their report · deadline 11:59 pm · WhatsApp group “${esc(E.S.waGroupName)}”</div>${rows || '<div class="card muted">No staff.</div>'}
    <p class="muted">Files are kept for ${E.S.reportKeepDays} days (they are also in the WhatsApp group), then removed automatically to keep Firebase free.</p>`;
 };
 ACT.openReport = b => { APP.date = b.dataset.ds; APP.view = 'dailyrep'; closeModal(); render(); };
-ACT.openPdf = async b => { toast('Opening…'); const d = await adminFile(b.dataset.sid, b.dataset.fid); if (!d) return toast('File no longer stored'); openDataURL(d, b.dataset.name); };
-ACT.adminPhoto = async b => { const d = await adminFile(b.dataset.sid, b.dataset.fid); if (!d) return toast('File no longer stored'); openModal(`<div style="text-align:center"><img src="${d}" style="max-width:100%;max-height:75vh;border-radius:12px"></div><button class="btn big g" style="margin-top:12px" data-act="closeModal">Close</button>`); };
+ACT.openPdf = async b => { toast('Opening…'); const d = await adminFile(b.dataset.sid, b.dataset.fid); if (!d) return toast('File no longer stored'); openDataURL(d, b.dataset.name, 'application/pdf'); };
+ACT.adminPhoto = async b => { const d = safeImg(await adminFile(b.dataset.sid, b.dataset.fid)); if (!d) return toast('File no longer stored'); openModal(`<div style="text-align:center"><img src="${d}" style="max-width:100%;max-height:75vh;border-radius:12px"></div><button class="btn big g" style="margin-top:12px" data-act="closeModal">Close</button>`); };
 /* =====================================================================
    ADMIN — requests (leave, corrections, 2nd-admin approvals), devices, staff
    ===================================================================== */
@@ -1270,16 +1330,23 @@ VIEWS.requests = function () {
   return `<div class="bar"><h2>Requests</h2></div>
    <div class="card"><h3>Waiting (${pend.length + po.filter(([, p]) => p.byUid !== APP.uid).length})</h3>
    ${pend.length ? `<div class="tw"><table><tr><th>Staff</th><th>Request</th><th></th></tr>${pend.map(x => reqRow(x, `<input id="cm_${x.rid}" placeholder="Comment (optional)" style="width:160px"><br><button class="btn gr s" data-act="decide" data-ok="1" data-sid="${x.sid}" data-rid="${x.rid}">Approve</button> <button class="btn r s" data-act="decide" data-ok="0" data-sid="${x.sid}" data-rid="${x.rid}">Reject</button>`)).join('')}</table></div>` : '<p class="muted">No leave or correction requests waiting.</p>'}
-   ${po.length ? `<h3 style="margin-top:14px">Corrections needing a second admin</h3><div class="tw"><table><tr><th>Day</th><th>Change</th><th>By</th><th></th></tr>${po.map(([id, p]) => `<tr><td>${esc(sName(p.sid))}<br>${fmtDateDow(p.ds)}</td><td class="wrap">${esc(p.data.status || 'auto')} ${esc(p.data.in || '')}–${esc(p.data.out || '')}<div>${esc(p.reason)}</div></td><td>${esc(p.by)}<div class="muted">${fmtDT(p.at)}</div></td>
+   ${po.length ? `<h3 style="margin-top:14px">Corrections needing a second admin</h3><div class="tw"><table><tr><th>Day</th><th>Change</th><th>By</th><th></th></tr>${po.map(([id, p]) => `<tr><td>${esc(sName(p.sid))}<br>${fmtDateDow(p.ds)}</td><td class="wrap">${p.remove ? '<b>Remove correction</b>' : `${esc(p.data.status || 'auto')} ${esc(p.data.in || '')}–${esc(p.data.out || '')}`}<div>${esc(p.reason)}</div></td><td>${esc(p.by)}<div class="muted">${fmtDT(p.at)}</div></td>
      <td>${p.byUid === APP.uid ? '<span class="muted">Waiting for the other admin</span> <button class="btn g s" data-act="poCancel" data-id="' + id + '">Withdraw</button>' : `<button class="btn gr s" data-act="poOk" data-id="${id}">Approve</button> <button class="btn r s" data-act="poNo" data-id="${id}">Reject</button>`}</td></tr>`).join('')}</table></div>` : ''}
    </div>
    <div class="card"><h3>Recent decisions</h3>${done.length ? `<div class="tw"><table><tr><th>Staff</th><th>Request</th><th>Status</th></tr>${done.slice(0, 40).map(x => reqRow(x, x.r.status === 'approved' ? '<span class="ok">Approved</span>' : `<span class="flag">${esc(x.r.status)}</span>`)).join('')}</table></div>` : '<p class="muted">None yet.</p>'}</div>`;
 };
-ACT.viewAttach = b => { const r = DATA.requests[b.dataset.sid][b.dataset.rid]; const a = r.attachment || ''; openModal(`<h3>Document</h3>${a.startsWith('data:image') ? `<img src="${a}" style="max-width:100%">` : `<a href="${a}" download="document.pdf" class="btn">Download PDF</a>`}<p><button class="btn g" data-act="closeModal">Close</button></p>`); };
+ACT.viewAttach = b => {
+  const r = DATA.requests[b.dataset.sid][b.dataset.rid]; const a = r.attachment || '';
+  if (safeImg(a)) return openModal(`<h3>Document</h3><img src="${safeImg(a)}" style="max-width:100%;border-radius:10px"><button class="btn big g" style="margin-top:12px" data-act="closeModal">Close</button>`);
+  openDataURL(a, 'medical-note.pdf', 'application/pdf');
+};
 ACT.decide = async b => {
   const sid = b.dataset.sid, rid = b.dataset.rid, ok = b.dataset.ok === '1'; const r = DATA.requests[sid][rid];
   const comment = val('cm_' + rid);
-  if (!ok && !comment && !confirm('Reject without a comment?')) return;
+  const days = r.kind === 'leave' ? EG.daysBetween(r.from, r.to || r.from) : [r.date];
+  const lockedM = [...new Set(days.map(mkOf))].filter(mk => E.isLocked(mk));
+  if (ok && lockedM.length) return toast(`${monthName(lockedM[0])} is locked — unlock it in Salary first`, 4000);
+  if (!ok && !comment && !await askYes('Reject without a comment?')) return;
   const status = ok ? 'approved' : 'rejected';
   const upd = {};
   upd[`requests/${sid}/${rid}/status`] = status; upd[`requests/${sid}/${rid}/comment`] = comment; upd[`requests/${sid}/${rid}/decidedBy`] = APP.me.name; upd[`requests/${sid}/${rid}/decidedAt`] = TS();
@@ -1296,7 +1363,8 @@ ACT.decide = async b => {
 };
 ACT.poOk = async b => {
   const p = DATA.pendingOverrides[b.dataset.id]; if (p.byUid === APP.uid) return toast('Another admin must approve');
-  const o = Object.assign({}, p.data, { reason: p.reason + ' (approved by ' + APP.me.name + ')', approvedBy: APP.me.name });
+  if (E.isLocked(mkOf(p.ds))) return toast(`${monthName(mkOf(p.ds))} is locked — unlock it in Salary first`, 4000);
+  const o = p.remove ? null : Object.assign({}, p.data, { reason: p.reason + ' (approved by ' + APP.me.name + ')', approvedBy: APP.me.name });
   await dbUpdate({ [`overrides/${p.sid}/${p.ds}`]: o, [`pendingOverrides/${b.dataset.id}`]: null });
   await log('override-approved', `${sName(p.sid)} · ${p.ds} · by ${p.by}, approved by ${APP.me.name}`); toast('Approved');
 };
@@ -1309,7 +1377,7 @@ VIEWS.devices = function () {
   const kiosks = Object.entries(DATA.kiosks || {});
   const kioskURL = location.origin + location.pathname + '?kiosk';
   return `<div class="bar"><h2>Devices &amp; access</h2></div>
-  <div class="card"><h3>Staff phones waiting for approval</h3>${dr.length ? `<div class="tw"><table><tr><th>Selfie</th><th>Says they are</th><th>Phone</th><th></th></tr>${dr.map(([uid, r]) => `<tr><td>${r.selfie ? `<img class="selfie" src="${r.selfie}">` : ''}</td><td><b>${esc(sName(r.sid))}</b><div class="muted">code ${esc(r.code || uid.slice(-6).toUpperCase())} · ${fmtDT(r.at)}</div>${(DATA.staffPrivate[r.sid] || {}).device ? '<span class="flag">Replaces their current phone</span>' : ''}</td><td class="wrap muted">${esc(r.ua || '')}</td>
+  <div class="card"><h3>Staff phones waiting for approval</h3>${dr.length ? `<div class="tw"><table><tr><th>Selfie</th><th>Says they are</th><th>Phone</th><th></th></tr>${dr.map(([uid, r]) => `<tr><td>${safeImg(r.selfie) ? `<img class="selfie" src="${safeImg(r.selfie)}">` : ''}</td><td><b>${esc(sName(r.sid))}</b><div class="muted">code ${esc(r.code || uid.slice(-6).toUpperCase())} · ${fmtDT(r.at)}</div>${(DATA.staffPrivate[r.sid] || {}).device ? '<span class="flag">Replaces their current phone</span>' : ''}</td><td class="wrap muted">${esc(r.ua || '')}</td>
     <td><button class="btn gr s" data-act="devOk" data-uid="${uid}">Approve</button> <button class="btn r s" data-act="devNo" data-uid="${uid}">Reject</button></td></tr>`).join('')}</table></div>` : '<p class="muted">None.</p>'}
    <p class="muted">Each staff member can use only one approved phone. Approving a new phone switches off the old one.</p></div>
   <div class="card"><h3>Office QR screens</h3>
@@ -1330,13 +1398,13 @@ ACT.devOk = async b => {
   await dbUpdate(upd); await log('device-approved', `${sName(r.sid)} phone approved${old ? ' (replaced old phone)' : ''}`); toast('Phone approved');
 };
 ACT.devNo = async b => { const r = DATA.deviceRequests[b.dataset.uid]; await dbSet('deviceRequests/' + b.dataset.uid, null); await log('device-rejected', sName(r.sid)); };
-ACT.devRevoke = async b => { const sid = b.dataset.sid; const d = DATA.staffPrivate[sid].device; if (!confirm('Revoke ' + sName(sid) + "'s phone? They will need to register again.")) return; await dbUpdate({ [`deviceMap/${d.uid}`]: null, [`staffPrivate/${sid}/device`]: null }); await log('device-revoked', sName(sid)); };
+ACT.devRevoke = async b => { const sid = b.dataset.sid; const d = DATA.staffPrivate[sid].device; if (!await askYes('Revoke ' + sName(sid) + "'s phone? They will need to register again.")) return; await dbUpdate({ [`deviceMap/${d.uid}`]: null, [`staffPrivate/${sid}/device`]: null }); await log('device-revoked', sName(sid)); };
 ACT.kioskOk = async b => { const uid = b.dataset.uid; await dbUpdate({ [`kiosks/${uid}`]: { name: val('kn_' + uid) || 'Office PC', approvedAt: TS(), by: APP.me.name }, [`kioskRequests/${uid}`]: null }); await log('kiosk-approved', val('kn_' + uid)); toast('QR screen approved'); };
 ACT.kioskNo = async b => { await dbSet('kioskRequests/' + b.dataset.uid, null); };
-ACT.kioskRemove = async b => { if (!confirm('Remove this QR screen?')) return; await dbUpdate({ [`kiosks/${b.dataset.uid}`]: null, [`kioskState/${b.dataset.uid}`]: null }); await log('kiosk-removed', b.dataset.uid); };
+ACT.kioskRemove = async b => { if (!await askYes('Remove this QR screen?')) return; await dbUpdate({ [`kiosks/${b.dataset.uid}`]: null, [`kioskState/${b.dataset.uid}`]: null }); await log('kiosk-removed', b.dataset.uid); };
 ACT.adminOk = async b => { const uid = b.dataset.uid, r = DATA.adminRequests[uid]; await dbUpdate({ [`admins/${uid}`]: { email: r.email, name: r.name, since: TS(), by: APP.me.name }, [`adminRequests/${uid}`]: null }); await log('admin-approved', r.name); toast('Admin approved'); };
 ACT.adminNo = async b => { await dbSet('adminRequests/' + b.dataset.uid, null); };
-ACT.adminRemove = async b => { const a = DATA.admins[b.dataset.uid]; if (!confirm('Remove admin access for ' + a.name + '?')) return; await dbSet('admins/' + b.dataset.uid, null); await log('admin-removed', a.name); };
+ACT.adminRemove = async b => { const a = DATA.admins[b.dataset.uid]; if (!await askYes('Remove admin access for ' + a.name + '?')) return; await dbSet('admins/' + b.dataset.uid, null); await log('admin-removed', a.name); };
 
 /* ---------- STAFF (#42 revisions, #57 dob, #59 assets, #62 shifts, #48 join/leave) ---------- */
 VIEWS.staff = function () {
@@ -1395,10 +1463,10 @@ ACT.saveStaff = async b => {
   closeModal(); toast('Saved');
 };
 ACT.addRev = async b => { const sid = b.dataset.sid, mk = val('rv_mk'), amt = +val('rv_amt'); if (!mk || !(amt > 0)) return toast('Month and amount needed'); await dbSet(`staffPrivate/${sid}/revisions/${mk}`, amt); await log('salary-revision', `${sName(sid)} · from ${mk} · ₹${amt}`); ACT.editStaff({ dataset: { sid } }); toast('Revision added'); };
-ACT.delRev = async b => { if (!confirm('Delete this revision?')) return; await dbSet(`staffPrivate/${b.dataset.sid}/revisions/${b.dataset.mk}`, null); await log('salary-revision-deleted', sName(b.dataset.sid) + ' ' + b.dataset.mk); ACT.editStaff({ dataset: { sid: b.dataset.sid } }); };
+ACT.delRev = async b => { if (!await askYes('Delete this revision?')) return; await dbSet(`staffPrivate/${b.dataset.sid}/revisions/${b.dataset.mk}`, null); await log('salary-revision-deleted', sName(b.dataset.sid) + ' ' + b.dataset.mk); ACT.editStaff({ dataset: { sid: b.dataset.sid } }); };
 ACT.assetAdd = async b => { const sid = b.dataset.sid, item = val('as_item'); if (!item) return toast('Item name needed'); await dbSet(`staffPrivate/${sid}/assets/${dbPushKey('x')}`, { item, serial: val('as_ser'), issued: val('as_dt') || E.today }); await log('asset-issued', sName(sid) + ' · ' + item); ACT.editStaff({ dataset: { sid } }); };
 ACT.assetReturn = async b => { await dbSet(`staffPrivate/${b.dataset.sid}/assets/${b.dataset.id}/returned`, E.today); ACT.editStaff({ dataset: { sid: b.dataset.sid } }); };
-ACT.assetDel = async b => { if (!confirm('Delete this asset entry?')) return; await dbSet(`staffPrivate/${b.dataset.sid}/assets/${b.dataset.id}`, null); ACT.editStaff({ dataset: { sid: b.dataset.sid } }); };
+ACT.assetDel = async b => { if (!await askYes('Delete this asset entry?')) return; await dbSet(`staffPrivate/${b.dataset.sid}/assets/${b.dataset.id}`, null); ACT.editStaff({ dataset: { sid: b.dataset.sid } }); };
 /* =====================================================================
    ADMIN — salary, lock, payslips, bonus, full & final, annual register
    ===================================================================== */
@@ -1442,14 +1510,17 @@ CHG.adj = async el => {
 ACT.toggleLock = async () => {
   const mk = APP.month;
   if (E.isLocked(mk)) {
-    if (!confirm('Unlock ' + monthName(mk) + '? Salary will be recalculated live.')) return;
+    if (!await askYes('Unlock ' + monthName(mk) + '? Salary will be recalculated live.')) return;
     const upd = { [`locks/${mk}`]: null, [`snapshots/${mk}`]: null };
     Object.entries(DATA.snapshots || {}).forEach(([m, ss]) => Object.entries(ss || {}).forEach(([sid, s]) => { if (s.arrearsPaidIn === mk) upd[`snapshots/${m}/${sid}/arrearsPaidIn`] = null; }));
     await dbUpdate(upd); await log('unlock', mk); return toast('Unlocked');
   }
   const ids = staffIds(true).filter(sid => { const m = E.month(sid, mk); return DATA.staff[sid].active !== false || m.presentDays > 0; });
   const prov = ids.some(sid => E.month(sid, mk).provisional);
-  if (!confirm(`Lock ${monthName(mk)}?${prov ? '\n\nWARNING: the month is not over yet.' : ''}\n\nAttendance corrections and salary for this month will be frozen and payslips released to staff.`)) return;
+  let waiting = Object.values(DATA.pendingOverrides || {}).filter(p => p && mkOf(p.ds) === mk).length;
+  Object.values(DATA.requests || {}).forEach(rs => Object.values(rs || {}).forEach(r => { if (r && r.status === 'pending' && ((r.date && mkOf(r.date) === mk) || (r.from && mkOf(r.from) <= mk && mkOf(r.to || r.from) >= mk))) waiting++; }));
+  if (waiting && !await askYes(`${waiting} request(s) / correction(s) for ${monthName(mk)} are still waiting. They will not count once the month is locked.\n\nLock anyway?`, 'Lock anyway')) return;
+  if (!await askYes(`Lock ${monthName(mk)}?${prov ? '\n\nWARNING: the month is not over yet.' : ''}\n\nAttendance corrections and salary for this month will be frozen and payslips released to staff.`)) return;
   const upd = { [`locks/${mk}`]: { by: APP.me.name, at: TS() } };
   ids.forEach(sid => {
     const s = E.snapshotFor(sid, mk); upd[`snapshots/${mk}/${sid}`] = s;
@@ -1465,9 +1536,9 @@ function letterhead() {
 }
 function signBlock(signed, who) {
   const st = settingsDefaults(); const a = DATA.assets || {};
-  const one = (key, name) => `<div class="one">${signed && a['sign_' + key] ? `<img class="sigimg" src="${a['sign_' + key]}">` : '<div class="blank"></div>'}<b>${name}</b><br>Partner</div>`;
+  const one = (key, name) => `<div class="one">${signed && safeImg(a['sign_' + key]) ? `<img class="sigimg" src="${safeImg(a['sign_' + key])}">` : '<div class="blank"></div>'}<b>${name}</b><br>Partner</div>`;
   const people = who === 'both' ? [['deepali', 'Deepali Vernekar'], ['shriraj', 'Shriraj Kinekar']] : who === 'shriraj' ? [['shriraj', 'Shriraj Kinekar']] : [['deepali', 'Deepali Vernekar']];
-  return `<div class="sigr">For ${esc(st.company)}${signed && a.stamp ? `<br><img class="stamp" src="${a.stamp}">` : ''}<div class="two">${people.map(p => one(p[0], p[1])).join('')}</div></div>`;
+  return `<div class="sigr">For ${esc(st.company)}${signed && safeImg(a.stamp) ? `<br><img class="stamp" src="${safeImg(a.stamp)}">` : ''}<div class="two">${people.map(p => one(p[0], p[1])).join('')}</div></div>`;
 }
 function payslipDoc(sid, mk, s, signed) {
   const u = s.u || DATA.staff[sid] || {}; const c = s.counts || {}; const st = settingsDefaults();
@@ -1520,7 +1591,7 @@ function bonusRows() { const st = settingsDefaults(); const f = APP.bonusFY || E
 ACT.bonusApply = async () => {
   const mk = val('bn_mk'); if (E.isLocked(mk)) return toast('That month is locked');
   const upd = {}; bonusRows().forEach(({ sid, b }) => { if (b.bonus) upd[`adjust/${sid}/${mk}/bonus`] = b.bonus; });
-  if (!confirm(`Set bonus in ${monthName(mk)} salary for ${Object.keys(upd).length} staff? (replaces any bonus already entered there)`)) return;
+  if (!await askYes(`Set bonus in ${monthName(mk)} salary for ${Object.keys(upd).length} staff? (replaces any bonus already entered there)`)) return;
   await dbUpdate(upd); await log('bonus', `Diwali bonus added to ${mk}`); closeModal(); APP.month = mk; APP.view = 'salary'; render(); toast('Bonus added');
 };
 ACT.bonusExport = () => xlsx([['Bonus', [['Emp ID', 'Name', 'Wages counted', 'Paid days', 'Eligible', 'Bonus']].concat(bonusRows().map(({ sid, b }) => [DATA.staff[sid].empId || '', sName(sid), b.wages, b.days, b.eligible ? 'Yes' : 'No', b.bonus]))]], 'Diwali_Bonus.xlsx');
@@ -1574,7 +1645,7 @@ ACT.ffPrint = b => {
    <div class="sig"><div><div class="blank"></div>Employee signature<br>Date:</div>${signBlock(b.dataset.signed === '1', 'both')}</div></div>`]);
 };
 ACT.ffMarkLeft = async () => {
-  const f = APP.ff; if (!confirm(`Mark ${sName(f.sid)} as left on ${fmtDate(f.lwd)}? Their phone access will be revoked.`)) return;
+  const f = APP.ff; if (!await askYes(`Mark ${sName(f.sid)} as left on ${fmtDate(f.lwd)}? Their phone access will be revoked.`)) return;
   const d = (DATA.staffPrivate[f.sid] || {}).device;
   const upd = { [`staff/${f.sid}/leftDate`]: f.lwd, [`staff/${f.sid}/active`]: false };
   if (d) { upd[`deviceMap/${d.uid}`] = null; upd[`staffPrivate/${f.sid}/device`] = null; }
@@ -1838,7 +1909,7 @@ VIEWS.settings = function () {
    <div class="form"><label class="full">Title<input id="n_t"></label><label class="full">Message<textarea id="n_b" rows="2"></textarea></label></div><p><button class="btn s" data-act="sendNotice">Send</button></p></div>
 
   <div class="card"><h3>Signatures &amp; stamp (for signed payslips / letters)</h3><p class="muted">PNG with transparent background works best. Visible to admins only.</p>
-   <div class="grid">${[['sign_deepali', 'Deepali Vernekar — signature'], ['sign_shriraj', 'Shriraj Kinekar — signature'], ['stamp', 'Firm stamp']].map(([k, n]) => `<div><b>${n}</b><br>${a[k] ? `<img src="${a[k]}" style="height:60px;background:#fff;border:1px solid var(--line)"><br><button class="btn g s" data-act="delAsset" data-k="${k}">Remove</button>` : '<span class="muted">Not uploaded</span>'}<br><input type="file" accept="image/*" data-chg="upAsset" data-k="${k}"></div>`).join('')}</div></div>
+   <div class="grid">${[['sign_deepali', 'Deepali Vernekar — signature'], ['sign_shriraj', 'Shriraj Kinekar — signature'], ['stamp', 'Firm stamp']].map(([k, n]) => `<div><b>${n}</b><br>${safeImg(a[k]) ? `<img src="${safeImg(a[k])}" style="height:60px;background:#fff;border:1px solid var(--line)"><br><button class="btn g s" data-act="delAsset" data-k="${k}">Remove</button>` : '<span class="muted">Not uploaded</span>'}<br><input type="file" accept="image/*" data-chg="upAsset" data-k="${k}"></div>`).join('')}</div></div>
 
   <div class="card"><h3>Backup</h3><button class="btn o s" data-act="backup">Download full backup (JSON)</button> <span class="muted">Selfies are not included.</span></div>`;
 };
@@ -1853,7 +1924,8 @@ ACT.saveSettings = async () => {
     idleLockMins: +val('c_idle') || 0, oldEditDays: +val('c_old') || 0, secondAdminApproval: val('c_2nd'), reportEmails: val('c_rep'), bonusPercent: +val('c_bpct') || 8.33, bonusCeiling: +val('c_bceil') || 0
   });
   if (st.gpsMode !== 'off' && (!st.officeLat || !st.officeLng)) toast('Tip: set the office location for the GPS check', 4000);
-  await dbSet('settings', st); await log('settings', 'Settings saved'); toast('Settings saved');
+  const upd = {}; Object.keys(st).forEach(k => { if (k !== 'holidays' && k !== 'blackouts') upd['settings/' + k] = st[k] === undefined ? null : st[k]; });
+  await dbUpdate(upd); await log('settings', 'Settings saved'); toast('Settings saved');
 };
 ACT.useMyLocation = async () => { toast('Getting location…'); const g = await getGPS(); if (!g) return toast('Location not available — allow location permission'); $('#c_lat').value = g.lat.toFixed(6); $('#c_lng').value = g.lng.toFixed(6); toast(`Got it (±${g.acc} m). Press Save settings.`); };
 async function notice(title, body) { await ref('notices').push({ title, body, at: TS(), by: APP.me.name }); }
@@ -1888,3 +1960,179 @@ VIEWS.log = function () {
    <div class="tw"><table><tr><th>When</th><th>By</th><th>Action</th><th>Detail</th></tr>${f.map(i => `<tr><td>${fmtDT(i.at)}</td><td>${esc(i.by)}</td><td>${esc(i.action)}</td><td class="wrap">${esc(i.detail)}</td></tr>`).join('')}</table></div>`;
 };
 CHG.logQ = el => { APP.logQ = el.value; render(); };
+/* =====================================================================
+   PHONE LAYOUT for the admin portal (≤ 700 px wide)
+   Each section is redrawn as cards / lists that fit a phone screen.
+   The desktop versions stay as they are.
+   ===================================================================== */
+const phone = (name, fn) => { const desk = VIEWS[name]; VIEWS[name] = () => PH() ? fn() : desk(); VIEWS[name].desk = desk; };
+const kv = pairs => `<div class="kv">${pairs.map(([k, v]) => `<div><span>${k}</span><b>${v === '' || v == null ? '–' : v}</b></div>`).join('')}</div>`;
+
+/* ---------- Dashboard ---------- */
+phone('dash', () => {
+  AFTER.push(drawCharts);
+  const board = E.todayBoard(); const t = E.today; const c = adminCounts();
+  const n = { in: 0, out: 0, pend: 0, leave: 0, late: 0, norep: 0 };
+  board.forEach(({ r }) => {
+    if (r.inOffice) n.in++; else if (r.in && r.out) n.out++;
+    if (r.code === 'PEND') n.pend++; if (['SL', 'UL'].includes(r.code) && !r.in) n.leave++;
+    if (r.late) n.late++; if (r.in && !r.report.ok) n.norep++;
+  });
+  const kioskOn = Object.entries(DATA.kioskState || {}).filter(([k, s]) => (DATA.kiosks || {})[k] && s && nowMs() - s.at < 90000).length;
+  const ev = upcomingEvents(10); const job = DATA.jobState || {};
+  return `<div class="bar"><h2>Dashboard</h2></div>
+  <div class="muted" style="margin:-10px 0 12px">${fmtDateDow(t)}</div>
+  ${!pushOn() || !isStandalone() ? `<div class="hscroll" style="margin-bottom:12px">${!pushOn() ? `<button class="btn s o" data-act="enablePush">${ic('bell')} Enable alerts</button>` : ''}${installButtonHTML()}</div>` : ''}
+  ${c.req ? `<button class="info" style="display:block;width:100%;text-align:left;border:0" data-act="aTab" data-v="requests"><b>${c.req}</b> request(s) waiting › </button>` : ''}
+  ${c.dev ? `<button class="info" style="display:block;width:100%;text-align:left;border:0" data-act="aTab" data-v="devices"><b>${c.dev}</b> device / admin approval(s) waiting › </button>` : ''}
+  ${!kioskOn ? '<div class="warn">Office QR screen is <b>offline</b>.</div>' : ''}
+  <div class="stats">
+   <div class="stat"><b>${n.in}</b><span>In office</span></div><div class="stat"><b>${n.out}</b><span>Checked out</span></div><div class="stat"><b>${n.pend}</b><span>Not in yet</span></div>
+   <div class="stat"><b>${n.late}</b><span>Late</span></div><div class="stat"><b>${n.norep}</b><span>Report pending</span></div><div class="stat"><b>${n.leave}</b><span>On leave</span></div></div>
+  <div class="sec-h">Today</div>
+  <div class="list">${board.map(({ sid, r }) => `<button class="li" data-act="dayEdit" data-sid="${sid}" data-ds="${t}">
+     <div class="grow"><b>${esc(sName(sid))}</b><div class="muted">${r.in ? r.in + (r.out ? ' – ' + r.out : r.onBreak ? ' · on break' : ' · in office') : esc(codeLabel(r.code))}</div>
+     <div>${r.late ? `<span class="flag">late ${r.lateMin}m</span> ` : ''}${r.in ? reportChip(r.report, r) : ''}</div></div>${codeTag(r.code)}</button>`).join('') || '<div class="li muted">No staff yet.</div>'}</div>
+  ${ev.length ? `<div class="sec-h">Coming up</div><div class="list">${ev.map(e => `<div class="li"><span>${e.icon}</span><div class="grow">${esc(e.text)}</div><span class="muted">${e.when}</span></div>`).join('')}</div>` : ''}
+  <div class="list"><div class="li"><div class="grow">QR screen</div>${kioskOn ? '<span class="ok">Online</span>' : '<span class="bad">Offline</span>'}</div>
+   <div class="li"><div class="grow">Automatic jobs</div><span class="muted">${job.lastRun ? fmtDT(job.lastRun) : 'not set up'}</span></div></div>
+  <div class="card"><h3>Attendance % — 6 months</h3><canvas id="chAtt" height="220"></canvas></div>
+  <div class="card"><h3>Salary cost — 12 months</h3><canvas id="chSal" height="220"></canvas></div>`;
+});
+
+/* ---------- Today ---------- */
+phone('today', () => {
+  const ds = APP.date; const ids = staffIds(true).filter(id => DATA.staff[id].active !== false || E.day(id, ds).punches.length);
+  const def = E.dayDefault(ds);
+  return `<div class="bar"><h2>Today</h2>${dayPicker()}</div>
+  <div class="muted" style="margin:-6px 0 12px">${fmtDateDow(ds)} ${def === 'HO' ? '· Holiday: ' + esc(E.holidayName(ds)) : def === 'WO' ? '· Weekly off' : ''} ${E.isLocked(mkOf(ds)) ? '<span class="locked">LOCKED</span>' : ''}</div>
+  ${ids.map(sid => { const r = E.day(sid, ds); return `<div class="card">
+    <div class="rowh"><b style="font-size:16px">${esc(sName(sid))}</b><span class="sp"></span>${codeTag(r.code)} <span class="muted">${esc(codeLabel(r.code))}</span></div>
+    ${kv([['In', r.in || ''], ['Out', r.out || (r.inOffice ? 'in office' : '')], ['Hours', fmtH(r.hours)], ['Break', r.breakMin ? r.breakMin + 'm' : '']])}
+    <div style="display:flex;flex-wrap:wrap;gap:4px;align-items:center">${r.late ? `<span class="flag">late ${r.lateMin}m</span>` : ''}${r.early ? '<span class="flag">left early</span>' : ''}${r.flags.map(f => `<span class="flag">${esc(f)}</span>`).join('')}${r.in ? reportChip(r.report, r) : ''}</div>
+    ${r.earlyReason ? `<div class="muted" style="margin-top:4px">Early: ${esc(r.earlyReason)}</div>` : ''}
+    ${r.override ? `<div class="muted" style="margin-top:4px">Corrected: ${esc(r.override.reason)} (${esc(r.override.by || '')})</div>` : ''}
+    ${r.punches.length ? `<div class="hscroll" style="margin-top:8px">${r.punches.map(p => `<span class="chip">${{ in: 'IN', out: 'OUT', bout: 'BRK', bin: 'BACK' }[p.type]} ${istHM(p.at)}${p.hasSelfie ? ` <a href="#" data-act="selfie" data-sid="${sid}" data-pid="${p.id}">📷</a>` : ''}${p.gpsFar ? ' ⚠' : ''}</span>`).join('')}</div>` : ''}
+    <div style="display:flex;gap:8px;margin-top:10px">${r.report.any ? `<button class="btn s g" style="flex:1" data-act="openReport" data-sid="${sid}" data-ds="${ds}">${ic('doc')} Report</button>` : ''}<button class="btn s o" style="flex:1" data-act="dayEdit" data-sid="${sid}" data-ds="${ds}">Correct</button></div>
+  </div>`; }).join('') || '<div class="card muted">No staff.</div>'}`;
+});
+
+/* ---------- Register: one person's month as a calendar ---------- */
+phone('register', () => {
+  const ids = staffIds(true); const mk = APP.month;
+  if (!APP.regSid || !ids.includes(APP.regSid)) APP.regSid = ids[0];
+  if (APP.regGrid) return `<div class="bar"><h2>Register</h2>${monthPicker()}</div><div class="seg" style="margin-bottom:12px"><button data-act="regMode" data-g="0">By person</button><button class="on" data-act="regMode" data-g="1">Grid</button></div>` + VIEWS.register.desk().replace(/^<div class="bar">[\s\S]*?<\/div>/, '');
+  const sid = APP.regSid; if (!sid) return '<div class="bar"><h2>Register</h2></div><div class="card muted">No staff.</div>';
+  const m = E.month(sid, mk); const s = E.salary(sid, mk, { live: true }); const c = m.counts;
+  const first = dsDow(mk + '-01');
+  let cal = DOW.map(d => `<div class="hd">${d[0]}</div>`).join('') + '<div style="visibility:hidden"></div>'.repeat(first);
+  for (let d = 1; d <= m.D; d++) { const r = m.days[d]; cal += `<div class="${r.ds === E.today ? 'tdy' : ''}" data-act="dayEdit" data-sid="${sid}" data-ds="${r.ds}" style="cursor:pointer"><div class="dn">${d}</div>${codeTag(r.code)}${r.flags.length || r.late ? '<div style="color:var(--orange);font-size:14px;line-height:1">•</div>' : ''}</div>`; }
+  return `<div class="bar"><h2>Register</h2>${monthPicker()}</div>
+   <div class="seg" style="margin-bottom:10px"><button class="on" data-act="regMode" data-g="0">By person</button><button data-act="regMode" data-g="1">Grid</button></div>
+   <div class="hscroll" style="margin-bottom:12px">${ids.map(id => `<button class="chip ${id === sid ? 'on' : ''}" data-act="regSid" data-sid="${id}">${esc(sName(id).split(' ')[0])}</button>`).join('')}</div>
+   ${E.isLocked(mk) ? '<div class="info">Month is locked.</div>' : ''}
+   <div class="card"><div class="cal">${cal}</div></div>
+   <div class="stats"><div class="stat"><b>${c.P || 0}</b><span>Present</span></div><div class="stat"><b>${c.H || 0}</b><span>Half day</span></div><div class="stat"><b>${(c.A || 0) + (c.NR || 0)}</b><span>Absent / NR</span></div>
+    <div class="stat"><b>${(c.UL || 0) + (c.SL || 0)}</b><span>Leave</span></div><div class="stat"><b>${m.late}</b><span>Late</span></div><div class="stat"><b>${s.paidDays}</b><span>Paid days</span></div></div>
+   ${legendHTML()}<p class="muted">Tap a day to see scans and correct it. Orange dot = flag.</p>
+   <div class="hscroll"><button class="btn s g" data-act="printRegister">Print</button><button class="btn s g" data-act="exportMonth">Export Excel</button></div>`;
+});
+ACT.regMode = b => { APP.regGrid = b.dataset.g === '1'; render(); };
+ACT.regSid = b => { APP.regSid = b.dataset.sid; render(); };
+
+/* ---------- Requests ---------- */
+phone('requests', () => {
+  const pend = [], done = [];
+  Object.entries(DATA.requests || {}).forEach(([sid, rs]) => Object.entries(rs || {}).forEach(([rid, r]) => { if (r) (r.status === 'pending' ? pend : done).push({ sid, rid, r }); }));
+  pend.sort((a, b) => (a.r.at || 0) - (b.r.at || 0)); done.sort((a, b) => (b.r.decidedAt || b.r.at || 0) - (a.r.decidedAt || a.r.at || 0));
+  const po = Object.entries(DATA.pendingOverrides || {});
+  const what = (sid, r) => r.kind === 'leave'
+    ? `<b>${esc(EG.LEAVE_TYPES[r.leaveType] || 'Leave (unpaid)')}</b>${r.half ? ' (half day)' : ''}<div class="muted">${fmtDate(r.from)}${r.to && r.to !== r.from ? ' → ' + fmtDate(r.to) : ''} · ${r.days || ''} day(s)</div>`
+    : `<b>Correction</b><div class="muted">${fmtDateDow(r.date)} · in ${esc(r.in || '-')} / out ${esc(r.out || '-')}</div>`;
+  const warns = (sid, r, rid) => {
+    if (r.kind !== 'leave') { const d = E.day(sid, r.date); return `<div class="muted">Scanned: ${d.punches.map(p => p.type.toUpperCase() + ' ' + istHM(p.at)).join(', ') || 'nothing'}</div>`; }
+    const others = [...new Set(E.leaveOverlap(r.from, r.to || r.from, sid).map(o => sName(o.sid)))]; const bl = E.inBlackout(r.from, r.to || r.from);
+    return (others.length ? `<span class="flag">Also off: ${esc(others.join(', '))}</span> ` : '') + (bl.length ? `<span class="flag">Busy period</span> ` : '') + (r.attachment ? `<a href="#" data-act="viewAttach" data-sid="${sid}" data-rid="${rid}">📎 Document</a>` : '');
+  };
+  return `<div class="bar"><h2>Requests</h2></div>
+   <div class="sec-h">Waiting (${pend.length})</div>
+   ${pend.length ? pend.map(({ sid, rid, r }) => { return `<div class="card"><div class="rowh"><b>${esc(sName(sid))}</b><span class="sp"></span><span class="muted">${fmtDT(r.at)}</span></div>
+     <div style="margin-top:6px">${what(sid, r)}</div><div>${esc(r.reason || '')}</div>${warns(sid, r, rid)}
+     <input id="cm_${rid}" placeholder="Comment (optional)" style="width:100%;margin-top:8px">
+     <div style="display:flex;gap:8px;margin-top:8px"><button class="btn gr" style="flex:1" data-act="decide" data-ok="1" data-sid="${sid}" data-rid="${rid}">Approve</button><button class="btn r" style="flex:1" data-act="decide" data-ok="0" data-sid="${sid}" data-rid="${rid}">Reject</button></div></div>`; }).join('') : '<div class="card muted">Nothing waiting.</div>'}
+   ${po.length ? `<div class="sec-h">Corrections needing the other partner</div>${po.map(([id, p]) => `<div class="card"><b>${esc(sName(p.sid))}</b> · ${fmtDateDow(p.ds)}<div>${p.remove ? '<b>Remove correction</b>' : `${esc((p.data || {}).status || 'auto')} ${esc((p.data || {}).in || '')}–${esc((p.data || {}).out || '')}`}</div><div class="muted">${esc(p.reason)} — ${esc(p.by)}</div>
+     <div style="display:flex;gap:8px;margin-top:8px">${p.byUid === APP.uid ? `<button class="btn g" style="flex:1" data-act="poCancel" data-id="${id}">Withdraw</button>` : `<button class="btn gr" style="flex:1" data-act="poOk" data-id="${id}">Approve</button><button class="btn r" style="flex:1" data-act="poNo" data-id="${id}">Reject</button>`}</div></div>`).join('')}` : ''}
+   <div class="sec-h">Recent decisions</div>
+   <div class="list">${done.slice(0, 30).map(({ sid, r }) => `<div class="li"><div class="grow"><b>${esc(sName(sid))}</b> · ${what(sid, r)}${r.comment ? `<div class="muted">“${esc(r.comment)}” — ${esc(r.decidedBy || '')}</div>` : ''}</div>${r.status === 'approved' ? '<span class="ok">✓</span>' : '<span class="bad">✕</span>'}</div>`).join('') || '<div class="li muted">None yet.</div>'}</div>`;
+});
+
+/* ---------- Salary ---------- */
+phone('salary', () => {
+  const mk = APP.month; const lock = E.isLocked(mk); APP.salOpen = APP.salOpen || {};
+  const ids = staffIds(true).filter(sid => DATA.staff[sid].active !== false || E.month(sid, mk).presentDays > 0 || E.snapshot(sid, mk));
+  let tot = 0; const rows = ids.map(sid => { const s = E.salary(sid, mk); tot += s.net; return [sid, s]; });
+  return `<div class="bar"><h2>Salary</h2>${monthPicker()}</div>
+   <div class="card" style="display:flex;align-items:center;gap:10px"><div class="grow" style="flex:1"><div class="muted">${monthName(mk)} · total net</div><div class="big-net">${inr(tot)}</div>
+     ${lock ? `<span class="ok">🔒 Locked</span>` : E.month(ids[0] || '', mk).provisional ? '<span class="flag">Provisional — month not over</span>' : ''}</div>
+     <button class="btn o" data-act="salActions">Actions</button></div>
+   ${rows.map(([sid, s]) => {
+     const c = s.counts || {}; const open = APP.salOpen[sid]; const adj = ((DATA.adjust || {})[sid] || {})[mk] || {};
+     const inp = (f, l) => `<label>${l}<input class="amt" style="width:100%" type="number" inputmode="numeric" min="0" step="1" value="${adj[f] || ''}" data-chg="adj" data-f="${f}" data-sid="${sid}" ${lock ? 'disabled' : ''}></label>`;
+     return `<div class="card"><button class="rowh" style="width:100%;border:0;background:none;padding:0;text-align:left" data-act="salToggle" data-sid="${sid}">
+       <div style="flex:1"><b style="font-size:16px">${esc(sName(sid))}</b><div class="muted">${s.paidDays}/${s.D} paid days · LOP ${s.lop}${!s.monthly ? ' · <span class="flag">set salary</span>' : ''}</div></div>
+       <div style="text-align:right"><div class="big-net" style="font-size:20px">${inr(s.net)}</div><span class="muted">${open ? 'Hide ▲' : 'Details ▼'}</span></div></button>
+       <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px">${s.noReport ? `<span class="flag">${s.noReport} no report</span>` : ''}${s.missingOut ? `<span class="flag">${s.missingOut} no check-out</span>` : ''}${s.lateDays ? `<span class="flag">−${s.lateDays}d late cut</span>` : ''}</div>
+       ${open ? `${kv([['Monthly', num(s.monthly)], ['Present', c.P || 0], ['Half', c.H || 0], ['Absent/NR', (c.A || 0) + (c.NR || 0)]])}
+         ${kv([['Leave', (c.UL || 0) + (c.SL || 0)], ['Late', s.late], ['Off-day', s.ot || 0], ['Earned', num(s.earned + s.otAmt)]])}
+         ${s.arrears && s.arrears.total ? `<div class="muted">+ arrears ${inr(s.arrears.total)}</div>` : ''}
+         <div class="form" style="grid-template-columns:1fr 1fr;margin-top:8px">${inp('bonus', 'Bonus')}${inp('incentive', 'Incentive')}${inp('advance', 'Advance')}${inp('other', 'Other deduction')}</div>
+         <div class="hscroll" style="margin-top:10px"><button class="btn s o" data-act="payslip" data-sid="${sid}" data-signed="1">Payslip (signed)</button><button class="btn s g" data-act="payslip" data-sid="${sid}" data-signed="0">Unsigned</button><button class="btn s wa" data-act="waSlip" data-sid="${sid}">WhatsApp</button><button class="btn s g" data-act="ffOpen" data-sid="${sid}">Full &amp; final</button></div>` : ''}
+     </div>`; }).join('')}
+   <p class="muted">Per day = monthly ÷ days in month. Weekly offs/holidays paid. All leave unpaid. Days without a daily report (NR) unpaid.</p>`;
+});
+ACT.salToggle = b => { APP.salOpen = APP.salOpen || {}; APP.salOpen[b.dataset.sid] = !APP.salOpen[b.dataset.sid]; render(); };
+ACT.salActions = () => {
+  const lock = E.isLocked(APP.month);
+  openModal(`<h3>${monthName(APP.month)}</h3><div class="list">
+    <button class="li" data-act="toggleLock"><div class="grow">${lock ? '🔓 Unlock month' : '🔒 Finalise &amp; lock month'}</div></button>
+    <button class="li" data-act="payslipAll" data-signed="1"><div class="grow">Print all payslips (signed &amp; stamped)</div></button>
+    <button class="li" data-act="payslipAll" data-signed="0"><div class="grow">Print all payslips (unsigned)</div></button>
+    <button class="li" data-act="exportSalary"><div class="grow">Export Excel</div></button>
+    <button class="li" data-act="bonusCalc"><div class="grow">Diwali bonus calculator</div></button>
+    <button class="li" data-act="annualReg"><div class="grow">Annual salary register</div></button></div><button class="btn big g" data-act="closeModal">Close</button>`);
+};
+
+/* ---------- Staff ---------- */
+phone('staff', () => `<div class="bar"><h2>Staff</h2><button class="btn s" data-act="editStaff" data-sid="">+ Add</button></div>
+  <div class="list">${staffIds(true).map(sid => { const u = DATA.staff[sid], p = DATA.staffPrivate[sid] || {}; return `<button class="li" data-act="editStaff" data-sid="${sid}">
+    <div class="grow"><b>${esc(u.name)}</b>${u.active === false ? ' <span class="muted">(inactive)</span>' : ''}<div class="muted">${esc(u.empId || '')} · ${esc(u.designation || '')}</div>
+    <div class="muted">${inr(E.rate(sid, mkOf(E.today)))} · ${p.device ? 'phone ✓' : 'no phone'}</div></div><span class="chev">${ic('chev')}</span></button>`; }).join('') || '<div class="li muted">No staff yet.</div>'}</div>
+  <p class="muted">Partners are not staff — no attendance or salary for them.</p>`);
+
+/* ---------- Devices ---------- */
+phone('devices', () => {
+  const dr = Object.entries(DATA.deviceRequests || {}), kr = Object.entries(DATA.kioskRequests || {}), ar = Object.entries(DATA.adminRequests || {});
+  const kioskURL = location.origin + location.pathname + '?kiosk';
+  return `<div class="bar"><h2>Devices</h2></div>
+  <div class="sec-h">Staff phones waiting</div>
+  ${dr.length ? dr.map(([uid, r]) => `<div class="card"><div class="rowh">${safeImg(r.selfie) ? `<img class="selfie" src="${safeImg(r.selfie)}">` : ''}<div style="flex:1"><b>${esc(sName(r.sid))}</b><div class="muted">code ${esc(r.code || '')} · ${fmtDT(r.at)}</div>${(DATA.staffPrivate[r.sid] || {}).device ? '<span class="flag">Replaces current phone</span>' : ''}</div></div>
+     <div style="display:flex;gap:8px;margin-top:10px"><button class="btn gr" style="flex:1" data-act="devOk" data-uid="${uid}">Approve</button><button class="btn r" style="flex:1" data-act="devNo" data-uid="${uid}">Reject</button></div></div>`).join('') : '<div class="card muted">None.</div>'}
+  <div class="sec-h">Office QR screens</div>
+  ${kr.map(([uid, r]) => `<div class="card"><b style="font-size:20px;letter-spacing:2px">${esc(r.code)}</b> <span class="muted">${fmtDT(r.at)}</span>
+     <input id="kn_${uid}" value="Office PC" style="width:100%;margin-top:8px"><div style="display:flex;gap:8px;margin-top:8px"><button class="btn gr" style="flex:1" data-act="kioskOk" data-uid="${uid}">Approve</button><button class="btn r" style="flex:1" data-act="kioskNo" data-uid="${uid}">Reject</button></div></div>`).join('')}
+  <div class="list">${Object.entries(DATA.kiosks || {}).map(([uid, k]) => { const s = (DATA.kioskState || {})[uid]; const on = s && nowMs() - s.at < 90000; return `<div class="li"><div class="grow"><b>${esc(k.name)}</b><div class="muted">${s ? 'seen ' + fmtDT(s.at) : 'never'}</div></div>${on ? '<span class="ok">Online</span>' : '<span class="bad">Offline</span>'}<button class="btn s g" data-act="kioskRemove" data-uid="${uid}">Remove</button></div>`; }).join('')}
+   <button class="li" data-act="copyText" data-t="${esc(kioskURL)}"><div class="grow">Copy QR screen link<div class="muted" style="font-size:11px">${esc(kioskURL)}</div></div></button></div>
+  <div class="sec-h">Registered staff phones</div>
+  <div class="list">${staffIds(true).map(sid => { const d = (DATA.staffPrivate[sid] || {}).device; return `<div class="li"><div class="grow"><b>${esc(sName(sid))}</b><div class="muted">${d ? 'approved ' + fmtDT(d.approvedAt) + ' by ' + esc(d.by || '') : 'No phone registered'}</div></div>${d ? `<button class="btn s g" data-act="devRevoke" data-sid="${sid}">Revoke</button>` : ''}</div>`; }).join('')}</div>
+  <div class="sec-h">Admins</div>
+  ${ar.map(([uid, r]) => `<div class="card"><b>${esc(r.name)}</b><div class="muted">${esc(r.email)}</div><div style="display:flex;gap:8px;margin-top:8px"><button class="btn gr" style="flex:1" data-act="adminOk" data-uid="${uid}">Approve as admin</button><button class="btn r" style="flex:1" data-act="adminNo" data-uid="${uid}">Reject</button></div></div>`).join('')}
+  <div class="list">${Object.entries(DATA.admins || {}).map(([uid, a]) => `<div class="li"><div class="grow"><b>${esc(a.name)}</b>${a.owner ? ' <span class="ok">owner</span>' : ''}<div class="muted">${esc(a.email)}</div></div>${uid !== APP.uid ? `<button class="btn s g" data-act="adminRemove" data-uid="${uid}">Remove</button>` : '<span class="muted">you</span>'}</div>`).join('')}</div>`;
+});
+
+/* ---------- Activity log ---------- */
+phone('log', () => {
+  const items = Object.values(DATA.log || {}).sort((a, b) => b.at - a.at); const q = (APP.logQ || '').toLowerCase();
+  const f = (q ? items.filter(i => (i.by + ' ' + i.action + ' ' + i.detail).toLowerCase().includes(q)) : items).slice(0, 200);
+  return `<div class="bar"><h2>Activity Log</h2><input placeholder="Search…" value="${esc(APP.logQ || '')}" data-chg="logQ" style="flex:1"></div>
+   <div class="list">${f.map(i => `<div class="li"><div class="grow"><b>${esc(i.action)}</b> <span class="muted">${esc(i.by)}</span><div>${esc(i.detail)}</div><div class="muted">${fmtDT(i.at)}</div></div></div>`).join('') || '<div class="li muted">Nothing yet.</div>'}</div>`;
+});

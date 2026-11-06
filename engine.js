@@ -170,7 +170,7 @@
         return r;
       }
       const lv = leaveDay[sid] && leaveDay[sid][ds];
-      if (lv) {
+      if (lv && !(r.in && work > 0 && !lv.half)) { // came to work on a leave day → the work counts
         r.leave = lv;
         if (!lv.half) return applyCode(r, lv.type);
         r.code = work >= 0.5 ? 'H' : lv.type; r.paid = work >= 0.5 ? 0.5 : 0; return r;

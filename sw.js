@@ -1,5 +1,5 @@
 /* Service worker — offline app shell + push notifications */
-const CACHE = 'ss-att-v3.0';
+const CACHE = 'ss-att-v3.1';
 const SHELL = ['./', './index.html', './app.js', './engine.js', './manifest.json', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
 const CDN = /gstatic\.com\/firebasejs|cdn\.jsdelivr\.net|cdn\.sheetjs\.com/;
 

@@ -36,7 +36,7 @@ async function loadData() {
   admin.initializeApp({ credential: admin.credential.cert(sa), databaseURL: env.FIREBASE_DB_URL });
   db = admin.database();
   D = {};
-  const nodes = ['settings', 'staff', 'staffPrivate', 'punches', 'overrides', 'requests', 'adjust', 'locks', 'snapshots', 'pushSubs', 'notices', 'jobState', 'admins', 'assets', 'kioskState', 'kiosks', 'reports'];
+  const nodes = ['settings', 'staff', 'staffPrivate', 'punches', 'overrides', 'requests', 'adjust', 'locks', 'snapshots', 'pushSubs', 'notices', 'jobState', 'admins', 'assets', 'kioskState', 'kiosks', 'reports', 'deviceMap'];
   await Promise.all(nodes.map(async n => { D[n] = (await db.ref(`${ROOT}/${n}`).once('value')).val(); }));
 }
 const write = async (p, v) => { if (DRY || !db) { log('WRITE', p, JSON.stringify(v).slice(0, 120)); return; } await db.ref(`${ROOT}/${p}`).set(v); };
@@ -47,9 +47,15 @@ function initPush() {
   if (env.VAPID_PUBLIC && env.VAPID_PRIVATE) { webpush.setVapidDetails('mailto:' + (env.GMAIL_USER || 'admin@example.com'), env.VAPID_PUBLIC, env.VAPID_PRIVATE); pushReady = true; }
   else log('VAPID keys not set — push disabled');
 }
+/* A device's role is checked against the database, never taken from what the phone wrote */
 const subsOf = filter => {
   const out = [];
-  Object.entries(D.pushSubs || {}).forEach(([uid, m]) => Object.entries(m || {}).forEach(([key, s]) => { if (s && filter(s, uid)) out.push({ uid, key, s }); }));
+  Object.entries(D.pushSubs || {}).forEach(([uid, m]) => Object.entries(m || {}).forEach(([key, s]) => {
+    if (!s) return;
+    const isAdmin = !!(D.admins || {})[uid]; const sid = (D.deviceMap || {})[uid] || '';
+    const real = Object.assign({}, s, { role: isAdmin ? 'admin' : sid ? 'staff' : 'none', sid });
+    if (real.role !== 'none' && filter(real, uid)) out.push({ uid, key, s: real });
+  }));
   return out;
 };
 async function push(targets, title, body, tag) {
