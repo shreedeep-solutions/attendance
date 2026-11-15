@@ -3,6 +3,7 @@ name: Attendance jobs
 on:
   schedule:
     - cron: '*/10 3-14 * * *'   # every 10 min, 08:30–20:20 IST (alerts, reminders, payslip emails)
+    - cron: '30 15 * * 0'       # 21:00 IST Sunday — weekly backup email
     - cron: '30 16 * * *'       # 22:00 IST daily — last reminder for daily reports
     - cron: '30 17 * * *'       # 23:00 IST daily — month-end report (last day), file cleanup
     - cron: '0 18 28-31 * *'    # 23:30 IST backup run on month-end days
@@ -34,4 +35,5 @@ jobs:
           VAPID_PUBLIC: ${{ secrets.VAPID_PUBLIC }}
           VAPID_PRIVATE: ${{ secrets.VAPID_PRIVATE }}
           APP_URL: ${{ secrets.APP_URL }}
+          BACKUP_TO: ${{ secrets.BACKUP_TO }}
         run: node run.mjs

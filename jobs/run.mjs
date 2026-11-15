@@ -36,7 +36,7 @@ async function loadData() {
   admin.initializeApp({ credential: admin.credential.cert(sa), databaseURL: env.FIREBASE_DB_URL });
   db = admin.database();
   D = {};
-  const nodes = ['settings', 'staff', 'staffPrivate', 'punches', 'overrides', 'requests', 'adjust', 'locks', 'snapshots', 'pushSubs', 'notices', 'jobState', 'admins', 'assets', 'kioskState', 'kiosks', 'reports', 'deviceMap', 'swaps'];
+  const nodes = ['settings', 'staff', 'staffPrivate', 'punches', 'overrides', 'requests', 'adjust', 'locks', 'snapshots', 'pushSubs', 'notices', 'jobState', 'admins', 'assets', 'kioskState', 'kiosks', 'reports', 'deviceMap', 'swaps', 'userMap', 'remPrefs'];
   await Promise.all(nodes.map(async n => { D[n] = (await db.ref(`${ROOT}/${n}`).once('value')).val(); }));
 }
 const write = async (p, v) => { if (DRY || !db) { log('WRITE', p, JSON.stringify(v).slice(0, 120)); return; } await db.ref(`${ROOT}/${p}`).set(v); };
@@ -58,8 +58,14 @@ const subsOf = filter => {
   }));
   return out;
 };
+/* Office 2.3: quiet hours (default 21:00–08:00 IST) — nothing is pushed then, except the last daily-report reminder (deadline 11:59 pm) */
+function quietNow() {
+  const st = D.settings || {}; const qs = EG.toMin(st.quietStart || '21:00'), qe = EG.toMin(st.quietEnd || '08:00');
+  return qs > qe ? (hm >= qs || hm < qe) : (hm >= qs && hm < qe);
+}
 async function push(targets, title, body, tag) {
   const url = env.APP_URL || './index.html';
+  if (quietNow() && tag !== 'rep') { log('quiet hours — not sent:', title); return; }
   for (const t of targets) {
     if (DRY || !pushReady) { log('PUSH', t.s.role, t.s.name, '|', title, '|', body); continue; }
     try { await webpush.sendNotification(JSON.parse(t.s.sub), JSON.stringify({ title, body, tag, url })); }
@@ -67,7 +73,26 @@ async function push(targets, title, body, tag) {
   }
 }
 const toAdmins = (t, b, tag) => push(subsOf(s => s.role === 'admin'), t, b, tag);
-const toStaff = (sid, t, b, tag) => push(subsOf(s => s.role === 'staff' && s.sid === sid), t, b, tag);
+/* Office 2.3: each person can switch off reminder kinds (Settings → Reminders): rem, lunch, out, rep, due */
+const remOff = (sid, tag) => !!(D.remPrefs && D.remPrefs[sid] && D.remPrefs[sid][tag] === false);
+/* staff who picked हिंदी get the reminders in Hindi */
+const HI = [
+  [/^Good morning ☀️$/, 'सुप्रभात ☀️'], [/^Office starts at (\S+)\. Scan the office QR when you reach\.$/, 'ऑफिस $1 बजे शुरू होता है। पहुँचते ही ऑफिस का QR स्कैन करें।'],
+  [/^🍱 Lunch time$/, '🍱 लंच का समय'], [/^Lunch is (\S+)–(\S+)\. .*$/, 'लंच $1–$2 है। जाते समय QR स्कैन करके “Start break” चुनें।'],
+  [/^⏰ Lunch time is over$/, '⏰ लंच का समय ख़त्म'], [/^Back at your desk\? .*$/, 'सीट पर वापस? QR स्कैन करके “End break” चुनें।'],
+  [/^Office time is over$/, 'ऑफिस का समय ख़त्म'], [/^It is (\S+)\. Scan the QR when you leave.*$/, '$1 बज गए। जाते समय QR स्कैन करें — चेक-आउट न भूलें।'],
+  [/^🌙 Still in office\?$/, '🌙 अभी ऑफिस में हैं?'], [/^Explain any gaps, post your wrap-up.*$/, 'खाली समय का कारण बताएँ, दिन का सार लिखें और जाते समय “Check out” स्कैन करें।'],
+  [/^Not checked in yet$/, 'अभी चेक-इन नहीं हुआ'], [/^Office started at (\S+)\. .*$/, 'ऑफिस $1 बजे शुरू हुआ। पहुँचते ही QR स्कैन करें।'],
+  [/^Forgot to check out\?$/, 'चेक-आउट भूल गए?'], [/^You are still checked in\. .*$/, 'आप अभी भी चेक-इन हैं। जाते समय QR स्कैन करें — नहीं तो आधा दिन गिना जा सकता है।'],
+  [/^Daily report pending$/, 'रोज़ की रिपोर्ट बाकी'], [/^⏰ Last reminder: daily report$/, '⏰ आख़िरी याद: रोज़ की रिपोर्ट'], [/^Break over$/, 'ब्रेक ख़त्म'],
+  [/^Request (approved|rejected)$/, (m, x) => x === 'approved' ? 'अनुरोध मंज़ूर' : 'अनुरोध नामंज़ूर'],
+];
+const hiText = x => { for (const [re, to] of HI) if (re.test(x)) return x.replace(re, to); return x; };
+/* nothing for a person on their weekly off / holiday / approved leave (except the answer to their own request) */
+let E0 = null;
+const offToday = sid => { try { const r = E0 && E0.day(sid, today); return !!(r && r.off && !r.in); } catch (e) { return false; } };
+const isHi = sid => !!(D.remPrefs && D.remPrefs[sid] && D.remPrefs[sid].lang === 'hi');
+const toStaff = (sid, t, b, tag) => (offToday(sid) && tag !== 'dec') ? Promise.resolve(log('off today', sid, tag)) : isHi(sid) && !remOff(sid, tag) ? push(subsOf(s => s.role === 'staff' && s.sid === sid), hiText(t), hiText(b), tag) : remOff(sid, tag) ? Promise.resolve(log('off by choice', sid, tag)) : push(subsOf(s => s.role === 'staff' && s.sid === sid), t, b, tag);
 const toAll = (t, b, tag) => push(subsOf(() => true), t, b, tag);
 
 /* ---------------- email ---------------- */
@@ -204,6 +229,8 @@ async function taskAlerts(e) {
       if (r.inOffice && !r.onBreak && !hadBreak && hm >= ls && hm < le && !doneToday('lun1_' + sid)) { await toStaff(sid, '🍱 Lunch time', `Lunch is ${EG.minToHM(ls)}–${EG.minToHM(le)}. Scan the QR and choose “Start break” when you go.`, 'lunch'); await markDone('lun1_' + sid); }
       if (r.onBreak && hm >= le && !doneToday('lun2_' + sid)) { await toStaff(sid, '⏰ Lunch time is over', 'Back at your desk? Scan the QR and choose “End break”.', 'lunch'); await markDone('lun2_' + sid); } }
     if (r.inOffice && !r.onBreak && hm >= se && hm < se + 30 && !doneToday('out0_' + sid)) { await toStaff(sid, 'Office time is over', `It is ${sh.end}. Scan the QR when you leave — don’t forget to check out.`, 'out'); await markDone('out0_' + sid); }
+    // Office 2.3: 6:30 PM — still checked in? finish the wrap-up and check out
+    if (r.inOffice && !r.onBreak && hm >= se + 30 && hm < se + 75 && !doneToday('out1_' + sid)) { await toStaff(sid, '🌙 Still in office?', 'Explain any gaps, post your wrap-up and scan “Check out” before you leave.', 'out'); await markDone('out1_' + sid); }
     if (r.code === 'PEND' && hm >= ss + 30 && hm < se && !doneToday('rem_' + sid)) { await toStaff(sid, 'Not checked in yet', `Office started at ${sh.start}. Scan the QR at the office when you arrive.`, 'rem'); await markDone('rem_' + sid); }
     if (r.code === 'PEND' && hm >= ss + 120 && hm < se && !doneToday('abs_' + sid)) { await toAdmins('Not checked in', `${D.staff[sid].name} has not checked in by ${EG.minToHM(ss + 120)} and has no approved leave`, 'abs-' + sid); await markDone('abs_' + sid); }
     if (r.onBreak && sh.brk && r.breakMin > sh.brk + 10 && !doneToday('brk_' + sid)) { await toAdmins('Long break', `${D.staff[sid].name} on break for ${r.breakMin} min`, 'brk-' + sid); await toStaff(sid, 'Break over', `You have been on break ${r.breakMin} min (allowed ${sh.brk}). Scan "End break".`, 'brk'); await markDone('brk_' + sid); }
@@ -312,12 +339,100 @@ async function taskCleanup() {
   await markDone('cleanup'); if (n) log('selfies removed', n);
 }
 
+/* ---------------- Office 2.3 jobs ---------------- */
+/* 3 or more late check-ins in the last 7 days → tell the admins (once a week per person) */
+async function taskLatePattern(e) {
+  if (hm < 11 * 60 || doneToday('latepat')) return;
+  const wk = EG.addDays(today, -((IST.dow + 4) % 7)); // week starts Wednesday (same as the ranking)
+  const got = (JS().latePattern || {});
+  for (const sid of Object.keys(D.staff || {}).filter(s => D.staff[s].active !== false)) {
+    let n = 0; const days = [];
+    for (let i = 0; i < 7; i++) { const ds = EG.addDays(today, -i); try { const r = e.day(sid, ds); if (r.late) { n++; days.push(fmtDate(ds).slice(0, 5)); } } catch (x) { } }
+    if (n >= 3 && got[sid] !== wk) { await toAdmins('Late again and again', `${D.staff[sid].name} was late ${n} times in the last 7 days (${days.reverse().join(', ')}). A friendly word may help.`, 'latepat-' + sid); await write(`jobState/latePattern/${sid}`, wk); }
+  }
+  await markDone('latepat');
+}
+/* December: remind the admins to add next year's holidays (1st, 10th and 20th, until they are added) */
+async function taskHolidayList() {
+  if (IST.m !== 12 || ![1, 10, 20].includes(IST.d) || hm < 10 * 60 || doneToday('hollist')) return;
+  const ny = String(IST.y + 1); const have = Object.keys((D.settings || {}).holidays || {}).filter(d => d.startsWith(ny)).length;
+  if (have < 5) await toAdmins(`🗓 Add the ${ny} holiday list`, `Only ${have} holiday(s) for ${ny} are added. Open Leave & holidays → Office holidays and add next year's list (or import it).`, 'hollist');
+  await markDone('hollist');
+}
+/* 5 PM: tasks due tomorrow → the person they are assigned to (TaskFlow / Office phone notification) */
+async function taskDueTomorrow() {
+  if (!db || hm < 17 * 60 || hm >= 18 * 60 || doneToday('duetom')) return;
+  const tom = EG.addDays(today, 1);
+  try {
+    const fs = admin.firestore(); const by = {};
+    for (const f of ['dueDate', 'hardDue']) {
+      const snap = await fs.collection('tasks').where(f, '==', tom).get();
+      snap.forEach(d => { const t = d.data(); if (t.status === 'done' || !t.assignedTo || (f === 'dueDate' && t.hardDue && t.hardDue !== tom)) return; (by[t.assignedTo] = by[t.assignedTo] || new Map()).set(d.id, t.title); });
+    }
+    const uMap = D.userMap || {};
+    for (const [uid, m] of Object.entries(by)) {
+      const sid = uMap[uid]; if (sid && remOff(sid, 'due')) continue;
+      const u = await fs.doc('users/' + uid).get(); const tokens = (u.exists && u.data().fcmTokens) || []; if (!tokens.length) continue;
+      const titles = [...m.values()]; const title = `📅 ${titles.length} task${titles.length > 1 ? 's' : ''} due tomorrow`; const body = titles.slice(0, 3).join(' · ') + (titles.length > 3 ? ` +${titles.length - 3} more` : '');
+      if (DRY || quietNow()) { log('DUE', uid, title, body); continue; }
+      const res = await admin.messaging().sendEachForMulticast({ tokens, notification: { title, body }, webpush: { fcmOptions: { link: (env.APP_URL || '/') + '#mine' } }, data: { url: (env.APP_URL || '/') + '#mine', kind: 'due' } });
+      const bad = []; res.responses.forEach((r, i) => { if (!r.success && /registration-token-not-registered|invalid-argument/.test((r.error && r.error.code) || '')) bad.push(tokens[i]); });
+      if (bad.length) await fs.doc('users/' + uid).update({ fcmTokens: tokens.filter(t => !bad.includes(t)) });
+    }
+  } catch (x) { log('due tomorrow skipped:', x.message); }
+  await markDone('duetom');
+}
+/* Sunday night: full backup (Office data + attendance, without photos/selfies) + a simple Excel, emailed to the office */
+async function taskWeeklyBackup() {
+  if (IST.dow !== 0 || hm < 21 * 60 || doneToday('backup')) return;
+  const to = env.BACKUP_TO || env.GMAIL_USER; if (!to || !db) { log('backup: no email / database'); return; }
+  const zlib = require('zlib'); const XLSX = require('xlsx');
+  const out = { made: new Date(NOW).toISOString(), att: {}, firestore: {} };
+  const skip = new Set(['selfies', 'reportFiles', 'pushSubs', 'kioskState']);
+  for (const [k, v] of Object.entries(D)) if (!skip.has(k)) out.att[k] = v;
+  let fsOk = true;
+  try {
+    const fs = admin.firestore();
+    const grab = async (ref, depth) => {
+      const snap = await ref.get(); const res = {};
+      for (const d of snap.docs) {
+        const v = d.data(); res[d.id] = v;
+        if (depth > 0) { const subs = await d.ref.listCollections(); for (const c of subs) { if (c.id === 'files') continue; (v.__sub = v.__sub || {})[c.id] = await grab(c, depth - 1); } }
+      }
+      return res;
+    };
+    const cols = await fs.listCollections();
+    for (const c of cols) out.firestore[c.id] = await grab(c, ['hf_users', 'tasks'].includes(c.id) ? 1 : 0);
+  } catch (x) { fsOk = false; log('backup firestore:', x.message); }
+  const json = JSON.stringify(out, (k, v) => (v && typeof v === 'object' && typeof v.toDate === 'function') ? v.toDate().toISOString() : v);
+  const gz = zlib.gzipSync(Buffer.from(json));
+  const wb = XLSX.utils.book_new();
+  const tasks = Object.entries(out.firestore.tasks || {}).map(([id, t]) => ({ ID: id, Title: t.title, Society: t.societyName || '', Assigned: (out.firestore.users && out.firestore.users[t.assignedTo] || {}).name || t.assignedTo || '', Status: t.status, Due: t.hardDue || t.dueDate || '', Created: String(t.createdAt || '').slice(0, 10), Done: String(t.completedAt || '').slice(0, 10) }));
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(tasks.length ? tasks : [{ Note: 'No tasks' }]), 'Tasks');
+  const socs = Object.entries(out.firestore.societies || {}).map(([id, s]) => ({ ID: id, Name: s.name, Area: s.area || '', Bills: s.billFreq || '', Phone: s.phone || '' }));
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(socs.length ? socs : [{ Note: 'No societies' }]), 'Societies');
+  const e = EG.create(D, NOW); const mk = today.slice(0, 7);
+  const att = Object.keys(D.staff || {}).filter(s => D.staff[s].active !== false).map(sid => { const m = e.month(sid, mk); const c = m.counts || {}; return { Staff: D.staff[sid].name, Present: c.P || 0, Half: c.H || 0, Absent: (c.A || 0) + (c.NR || 0), Late: m.late || 0, Hours: Math.round(m.hours || 0) }; });
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(att.length ? att : [{ Note: 'No staff' }]), 'Attendance ' + mk);
+  const xls = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  const name = `ShreedeepOffice_backup_${today}`;
+  if (gz.length > 20 * 1024 * 1024) log('backup larger than 20 MB — Excel only');
+  await email(to, `Weekly backup — Shreedeep Office — ${fmtDate(today)}`,
+    ['Weekly backup of Shreedeep Office (tasks, societies, time, habits, attendance).', '',
+      `• ${name}.xlsx — easy to read in Excel`, `• ${name}.json.gz — full backup (keep it safe; it can be used to restore everything)`,
+      fsOk ? '' : '⚠ The tasks part could not be read this week — check the FIREBASE_SERVICE_ACCOUNT secret is for the taskflow-shreedeep project.',
+      '', 'Photos and selfies are not included.'].join('\n'),
+    [{ filename: name + '.xlsx', content: xls }].concat(gz.length <= 20 * 1024 * 1024 ? [{ filename: name + '.json.gz', content: gz }] : []));
+  await write('jobState/lastBackup', NOW);
+  await markDone('backup');
+}
+
 /* ---------------- main ---------------- */
 (async () => {
   try {
     await loadData(); initPush(); initMail();
     if (!D.settings) { log('No settings yet — nothing to do'); return; }
-    const e = EG.create(D, NOW);
+    const e = EG.create(D, NOW); E0 = e;
     log('IST', today, EG.istHM(NOW));
     await taskAlerts(e);
     await taskMorning(e);
@@ -325,6 +440,10 @@ async function taskCleanup() {
     await taskLockReminder();
     await taskPayslips();
     await taskWeekly(e);
+    await taskLatePattern(e);
+    await taskHolidayList();
+    await taskDueTomorrow();
+    await taskWeeklyBackup();
     await taskCleanup();
     await write('jobState/lastNotify', NOW);
     await write('jobState/lastRun', NOW);
