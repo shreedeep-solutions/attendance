@@ -36,7 +36,7 @@ async function loadData() {
   admin.initializeApp({ credential: admin.credential.cert(sa), databaseURL: env.FIREBASE_DB_URL });
   db = admin.database();
   D = {};
-  const nodes = ['settings', 'staff', 'staffPrivate', 'punches', 'overrides', 'requests', 'adjust', 'locks', 'snapshots', 'pushSubs', 'notices', 'jobState', 'admins', 'assets', 'kioskState', 'kiosks', 'reports', 'deviceMap'];
+  const nodes = ['settings', 'staff', 'staffPrivate', 'punches', 'overrides', 'requests', 'adjust', 'locks', 'snapshots', 'pushSubs', 'notices', 'jobState', 'admins', 'assets', 'kioskState', 'kiosks', 'reports', 'deviceMap', 'swaps'];
   await Promise.all(nodes.map(async n => { D[n] = (await db.ref(`${ROOT}/${n}`).once('value')).val(); }));
 }
 const write = async (p, v) => { if (DRY || !db) { log('WRITE', p, JSON.stringify(v).slice(0, 120)); return; } await db.ref(`${ROOT}/${p}`).set(v); };
@@ -182,6 +182,7 @@ async function markDone(k) { JS().done = JS().done || {}; (JS().done[today] = JS
 async function taskAlerts(e) {
   const since = JS().lastNotify || NOW - 15 * 60000;
   const staffIds = Object.keys(D.staff || {}).filter(s => D.staff[s].active !== false);
+  const st0 = Object.assign({}, EG.DEFAULTS, D.settings || {});
   // new punches → late alert
   for (const sid of staffIds) {
     Object.values((D.punches || {})[sid] || {}).forEach(p => { p._sid = sid; });
@@ -195,6 +196,14 @@ async function taskAlerts(e) {
   // today: not checked in, long break, still in office late
   for (const sid of staffIds) {
     const r = e.day(sid, today); const sh = e.shiftOf(sid); const ss = EG.toMin(sh.start), se = EG.toMin(sh.end);
+    // Shreedeep Office 2.2: gentle reminders — check in, lunch (break) start / end, check out
+    const off = r.off && !r.in;
+    if (!off && r.code === 'PEND' && hm >= ss && hm < ss + 20 && !doneToday('rem0_' + sid)) { await toStaff(sid, 'Good morning ☀️', `Office starts at ${sh.start}. Scan the office QR when you reach.`, 'rem'); await markDone('rem0_' + sid); }
+    { const ls = EG.toMin(st0.lunchStart || '14:00'), le = EG.toMin(st0.lunchEnd || EG.minToHM(ls + (sh.brk || 60)));
+      const hadBreak = (r.punches || []).some(p => p.type === 'bout');
+      if (r.inOffice && !r.onBreak && !hadBreak && hm >= ls && hm < le && !doneToday('lun1_' + sid)) { await toStaff(sid, '🍱 Lunch time', `Lunch is ${EG.minToHM(ls)}–${EG.minToHM(le)}. Scan the QR and choose “Start break” when you go.`, 'lunch'); await markDone('lun1_' + sid); }
+      if (r.onBreak && hm >= le && !doneToday('lun2_' + sid)) { await toStaff(sid, '⏰ Lunch time is over', 'Back at your desk? Scan the QR and choose “End break”.', 'lunch'); await markDone('lun2_' + sid); } }
+    if (r.inOffice && !r.onBreak && hm >= se && hm < se + 30 && !doneToday('out0_' + sid)) { await toStaff(sid, 'Office time is over', `It is ${sh.end}. Scan the QR when you leave — don’t forget to check out.`, 'out'); await markDone('out0_' + sid); }
     if (r.code === 'PEND' && hm >= ss + 30 && hm < se && !doneToday('rem_' + sid)) { await toStaff(sid, 'Not checked in yet', `Office started at ${sh.start}. Scan the QR at the office when you arrive.`, 'rem'); await markDone('rem_' + sid); }
     if (r.code === 'PEND' && hm >= ss + 120 && hm < se && !doneToday('abs_' + sid)) { await toAdmins('Not checked in', `${D.staff[sid].name} has not checked in by ${EG.minToHM(ss + 120)} and has no approved leave`, 'abs-' + sid); await markDone('abs_' + sid); }
     if (r.onBreak && sh.brk && r.breakMin > sh.brk + 10 && !doneToday('brk_' + sid)) { await toAdmins('Long break', `${D.staff[sid].name} on break for ${r.breakMin} min`, 'brk-' + sid); await toStaff(sid, 'Break over', `You have been on break ${r.breakMin} min (allowed ${sh.brk}). Scan "End break".`, 'brk'); await markDone('brk_' + sid); }

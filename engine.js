@@ -1,5 +1,6 @@
 /* =====================================================================
-   Shreedeep Solutions — Attendance & Payroll ENGINE  v3.0
+   Shreedeep Solutions — Attendance & Payroll ENGINE  v3.3
+   v3.3: weekly-off swaps (D.swaps) — a staff member works on the off day and takes another day off.
    Pure calculation code shared by the web app (browser) and the
    GitHub Actions jobs (Node). All dates are handled in IST.
    v3: no paid leave / comp-off; a working day counts only when the
@@ -67,6 +68,7 @@
     const staff = D.staff || {}, priv = D.staffPrivate || {};
     const overrides = D.overrides || {}, adjust = D.adjust || {}, locks = D.locks || {}, snaps = D.snapshots || {};
     const reports = D.reports || {};
+    const swaps = D.swaps || {};   // v3.3: approved weekly-off swaps per staff: { sid: { 'YYYY-MM-DD': 'work' | 'off' } }
     const woSet = new Set(arr(S.weeklyOff).map(Number));
     const hol = S.holidays || {};
     const cache = { day: {}, month: {} };
@@ -89,7 +91,13 @@
       });
     });
 
-    const dayDefault = ds => hol[ds] ? 'HO' : woSet.has(dsDow(ds)) ? 'WO' : null;
+    const dayDefault = (ds, sid) => {
+      if (hol[ds]) return 'HO';
+      const sw = sid && swaps[sid] && swaps[sid][ds];
+      if (sw === 'work') return null;          // came on the weekly off; the off moved to another day
+      if (sw === 'off') return 'WO';            // the moved weekly off
+      return woSet.has(dsDow(ds)) ? 'WO' : null;
+    };
     const holidayName = ds => hol[ds] || '';
     const shiftOf = sid => { const u = staff[sid] || {}; return { start: u.shiftStart || S.shiftStart, end: u.shiftEnd || S.shiftEnd, brk: +(u.breakMins || S.breakMins) || 0 }; };
 
@@ -124,7 +132,7 @@
       cache.day[key] = r;
       if ((u.joinDate && ds < u.joinDate) || (u.leftDate && ds > u.leftDate)) { r.code = 'NJ'; return r; }
       if (S.trackStart && ds < S.trackStart) { r.code = 'NT'; r.paid = 1; return r; }
-      const def = dayDefault(ds); r.off = def;
+      const def = dayDefault(ds, sid); r.off = def; if (swaps[sid] && swaps[sid][ds]) r.swap = swaps[sid][ds];
       const ps = (pbd[sid] && pbd[sid][ds]) || []; r.punches = ps;
       const inP = ps.find(p => p.type === 'in');
       let outP = null;
