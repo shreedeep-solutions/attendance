@@ -427,6 +427,59 @@ async function taskWeeklyBackup() {
   await markDone('backup');
 }
 
+/* Society locations: short Google Maps links (maps.app.goo.gl) have no location inside them, so the app saves the link
+   with geoPending=true and this job opens it here and writes lat/lng to the society. Runs every time (cheap). */
+const OLC='23456789CFGHJMPQRVWX';
+function olcDecode(code){code=code.toUpperCase().replace(/0+\+/,'+');const p=code.indexOf('+');if(p!==8)return null;const c=code.replace('+','');
+  let lat=-90,lng=-180,res=20;for(let i=0;i<Math.min(10,c.length);i+=2){const a=OLC.indexOf(c[i]),b=OLC.indexOf(c[i+1]);if(a<0||b<0)return null;lat+=a*res;lng+=b*res;if(i<8)res/=20;}
+  let hLat=res,hLng=res;if(c.length>10){let rl=res/5,rg=res/4;for(let i=10;i<c.length;i++){const d=OLC.indexOf(c[i]);if(d<0)return null;lat+=Math.floor(d/4)*rl;lng+=(d%4)*rg;hLat=rl;hLng=rg;rl/=5;rg/=4;}}
+  return {lat:+(lat+hLat/2).toFixed(6),lng:+(lng+hLng/2).toFixed(6)};}
+function olcRecover(short,refLat=19.1,refLng=73.0){short=short.toUpperCase();const p=short.indexOf('+');if(p>=8)return olcDecode(short);const pad=8-p;const res=Math.pow(20,2-pad/2);
+  const rl=Math.round(refLat/res)*res,rg=Math.round(refLng/res)*res;
+  const enc=(lat,lng)=>{let a=Math.min(Math.max(lat+90,0),179.999999),b=((lng+180)%360+360)%360,out='',r=20;for(let i=0;i<4;i++){const x=Math.floor(a/r),y=Math.floor(b/r);out+=OLC[x]+OLC[y];a-=x*r;b-=y*r;r/=20;}return out.slice(0,pad);};
+  const full=enc(rl,rg)+short;const d=olcDecode(full.slice(0,8)+'+'+full.slice(9));if(!d)return null;
+  // pick the nearest of the 3×3 neighbouring cells
+  let best=d;const half=res/2;if(d.lat-refLat>half)best={...d,lat:+(d.lat-res).toFixed(6)};else if(refLat-d.lat>half)best={...d,lat:+(d.lat+res).toFixed(6)};
+  if(best.lng-refLng>half)best={...best,lng:+(best.lng-res).toFixed(6)};else if(refLng-best.lng>half)best={...best,lng:+(best.lng+res).toFixed(6)};return best;}
+function parseLatLng(v){let s=String(v||'').trim();if(!s)return null;try{s=decodeURIComponent(s);}catch(e){}s=s.replace(/\+/g,m=>m);
+  const ok=(a,b)=>{a=+a;b=+b;return Math.abs(a)<=90&&Math.abs(b)<=180&&!(a===0&&b===0)?{lat:+a.toFixed(6),lng:+b.toFixed(6)}:null;};
+  let m=s.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/);if(m)return ok(m[1],m[2]);                    // exact pin
+  m=s.match(/[?&](?:q|ll|query|center|destination|daddr|sll)=(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)/);if(m)return ok(m[1],m[2]);
+  m=s.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);if(m)return ok(m[1],m[2]);                         // map centre
+  m=s.match(/(?:^|[^\d.])(-?\d{1,2}\.\d{3,})\s*[, ]\s*(-?\d{1,3}\.\d{3,})/);if(m)return ok(m[1],m[2]); // "19.1551, 72.9949"
+  m=s.match(/\b([23456789CFGHJMPQRVWX]{8}\+[23456789CFGHJMPQRVWX]{2,3})\b/i);if(m)return olcDecode(m[1]);
+  m=s.match(/(?:^|[\s/=])([23456789CFGHJMPQRVWX]{4,6}\+[23456789CFGHJMPQRVWX]{2,3})\b/i);if(m)return olcRecover(m[1]);
+  return null;}
+const isMapLink=v=>/^https?:\/\/(maps\.app\.goo\.gl|goo\.gl\/maps|g\.co\/kgs|(www\.)?google\.[a-z.]+\/maps|maps\.google\.[a-z.]+)/i.test(String(v||'').trim());
+
+async function readMapLink(link) {
+  let url = String(link).trim(); const seen = [url];
+  for (let i = 0; i < 6; i++) {
+    const r = await fetch(url, { redirect: 'manual', headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120 Safari/537.36', 'Accept-Language': 'en-IN,en' } });
+    const loc = r.headers.get('location');
+    if (loc) { url = new URL(loc, url).href; seen.push(url); const ll = parseLatLng(url); if (ll) return ll; continue; }
+    const body = await r.text();
+    for (const u of seen) { const ll = parseLatLng(u); if (ll) return ll; }
+    const pats = [/center=(-?\d+\.\d+)%2C(-?\d+\.\d+)/, /!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/, /@(-?\d+\.\d+),(-?\d+\.\d+),\d/, /\[null,null,(-?\d+\.\d+),(-?\d+\.\d+)\]/, /ll=(-?\d+\.\d+),(-?\d+\.\d+)/];
+    for (const re of pats) { const m = body.match(re); if (m && Math.abs(+m[1]) <= 90 && Math.abs(+m[2]) <= 180) return { lat: +(+m[1]).toFixed(6), lng: +(+m[2]).toFixed(6) }; }
+    return null;
+  }
+  return null;
+}
+async function taskSocietyGeo() {
+  if (!db || DRY) return;
+  let fs; try { fs = admin.firestore(); } catch (e) { return; }
+  let snap; try { snap = await fs.collection('societies').where('geoPending', '==', true).limit(20).get(); } catch (e) { log('geo:', e.message); return; }
+  for (const d of snap.docs) {
+    const s = d.data(); const tries = (+s.geoTries || 0) + 1;
+    try {
+      const ll = s.mapLink ? await readMapLink(s.mapLink) : null;
+      if (ll) { await d.ref.update({ lat: ll.lat, lng: ll.lng, geoPending: false, geoErr: null, geoTries: 0, locAt: new Date().toISOString() }); log('geo set', s.name, ll.lat, ll.lng); }
+      else await d.ref.update(tries >= 3 ? { geoPending: false, geoErr: 'Could not read this link — open it, long-press the building, copy the numbers shown and paste them', geoTries: tries } : { geoTries: tries });
+    } catch (e) { log('geo error', s.name, e.message); await d.ref.update(tries >= 3 ? { geoPending: false, geoErr: 'Could not open this link', geoTries: tries } : { geoTries: tries }).catch(() => { }); }
+  }
+}
+
 /* ---------------- main ---------------- */
 (async () => {
   try {
@@ -444,6 +497,7 @@ async function taskWeeklyBackup() {
     await taskHolidayList();
     await taskDueTomorrow();
     await taskWeeklyBackup();
+    await taskSocietyGeo();
     await taskCleanup();
     await write('jobState/lastNotify', NOW);
     await write('jobState/lastRun', NOW);
