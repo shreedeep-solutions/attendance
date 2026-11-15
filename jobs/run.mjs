@@ -72,7 +72,13 @@ async function push(targets, title, body, tag) {
     catch (e) { if (e.statusCode === 404 || e.statusCode === 410) await write(`pushSubs/${t.uid}/${t.key}`, null); else log('push error', e.statusCode, e.body || e.message); }
   }
 }
-const toAdmins = (t, b, tag) => push(subsOf(s => s.role === 'admin'), t, b, tag);
+/* Office 2.4 — one bell: every alert also lands in the person's notification list in the app */
+const uidOfSid = sid => Object.keys(D.userMap || {}).find(u => D.userMap[u] === sid) || null;
+async function toInbox(uids, title, body, tag) {
+  if (!db || DRY || !uids.length) return; let fs; try { fs = admin.firestore(); } catch (e) { return; }
+  for (const uid of uids) { try { await fs.collection('users').doc(uid).collection('inbox').add({ title, body, ev: 'att', kind: 'att', tag: tag || '', read: false, at: admin.firestore.FieldValue.serverTimestamp(), src: 'jobs' }); } catch (e) { log('inbox', uid, e.message); } }
+}
+const toAdmins = (t, b, tag) => { const q = quietNow(); return push(subsOf(s => s.role === 'admin'), t, b, tag).then(() => q ? null : toInbox(Object.keys(D.admins || {}), t, b, tag)); };
 /* Office 2.3: each person can switch off reminder kinds (Settings → Reminders): rem, lunch, out, rep, due */
 const remOff = (sid, tag) => !!(D.remPrefs && D.remPrefs[sid] && D.remPrefs[sid][tag] === false);
 /* staff who picked हिंदी get the reminders in Hindi */
@@ -92,7 +98,8 @@ const hiText = x => { for (const [re, to] of HI) if (re.test(x)) return x.replac
 let E0 = null;
 const offToday = sid => { try { const r = E0 && E0.day(sid, today); return !!(r && r.off && !r.in); } catch (e) { return false; } };
 const isHi = sid => !!(D.remPrefs && D.remPrefs[sid] && D.remPrefs[sid].lang === 'hi');
-const toStaff = (sid, t, b, tag) => (offToday(sid) && tag !== 'dec') ? Promise.resolve(log('off today', sid, tag)) : isHi(sid) && !remOff(sid, tag) ? push(subsOf(s => s.role === 'staff' && s.sid === sid), hiText(t), hiText(b), tag) : remOff(sid, tag) ? Promise.resolve(log('off by choice', sid, tag)) : push(subsOf(s => s.role === 'staff' && s.sid === sid), t, b, tag);
+const toStaff = (sid, t, b, tag) => toStaff0(sid, t, b, tag).then(r => { if (!(offToday(sid) && tag !== 'dec') && !remOff(sid, tag) && !quietNow()) { const u = uidOfSid(sid); if (u) return toInbox([u], isHi(sid) ? hiText(t) : t, isHi(sid) ? hiText(b) : b, tag); } return r; });
+const toStaff0 = (sid, t, b, tag) => (offToday(sid) && tag !== 'dec') ? Promise.resolve(log('off today', sid, tag)) : isHi(sid) && !remOff(sid, tag) ? push(subsOf(s => s.role === 'staff' && s.sid === sid), hiText(t), hiText(b), tag) : remOff(sid, tag) ? Promise.resolve(log('off by choice', sid, tag)) : push(subsOf(s => s.role === 'staff' && s.sid === sid), t, b, tag);
 const toAll = (t, b, tag) => push(subsOf(() => true), t, b, tag);
 
 /* ---------------- email ---------------- */
@@ -480,6 +487,37 @@ async function taskSocietyGeo() {
   }
 }
 
+
+/* Office 2.4 — the team board (who is in, on leave, birthdays) for My Day and the office screen,
+   leave asked in Attendance shown in Tasks too, and birthdays typed by staff copied to Attendance */
+async function taskBoard(e) {
+  if (!db || DRY) return;
+  const staff = D.staff || {}; const act = Object.keys(staff).filter(s => staff[s].active !== false);
+  const inl = {}, lv = {}, bd = {};
+  act.forEach(sid => { try { const r = e.day(sid, today); if (r.inOffice) inl[sid] = staff[sid].name; if (r.leave && !(r.in)) lv[sid] = staff[sid].name; } catch (x) { } });
+  let users = {}; try { const fs = admin.firestore(); const snap = await fs.collection('users').get(); snap.forEach(d => { users[d.id] = d.data(); }); } catch (x) { users = null; }
+  const md = today.slice(5);
+  act.forEach(sid => { const p = (D.staffPrivate || {})[sid] || {}; if (p.dob && String(p.dob).slice(5) === md) bd[sid] = staff[sid].name; });
+  if (users) Object.values(users).forEach(u => { if (u && !u.disabled && u.dob && String(u.dob).slice(5) === md && !Object.values(bd).includes(u.name)) bd['u_' + (u.uid || u.name)] = u.name; });
+  const old = (JS().boardSig || ''); const sig = JSON.stringify([today, inl, lv, bd]);
+  if (sig !== old) { await db.ref('att/board').update({ date: today, in: inl, leave: lv, bdays: bd, at: NOW }); await write('jobState/boardSig', sig); }
+  // birthdays typed by staff in the app → attendance (only if attendance has none)
+  if (users) for (const [uid, u] of Object.entries(users)) { const sid = (D.userMap || {})[uid]; if (!sid || !u.dob) continue; const p = (D.staffPrivate || {})[sid] || {}; if (!p.dob) { await db.ref(`att/staffPrivate/${sid}/dob`).set(u.dob); log('dob copied', sid); } }
+  // leave from Attendance → Tasks leave list (so planning, calendar and the team leave calendar see it)
+  if (users) {
+    let fs; try { fs = admin.firestore(); } catch (x) { return; }
+    const want = {};
+    for (const [sid, m] of Object.entries(D.requests || {})) for (const [rid, r] of Object.entries(m || {})) {
+      if (!r || r.kind !== 'leave' || !r.from) continue; if ((r.to || r.from) < EG.addDays(today, -40)) continue; const uid = uidOfSid(sid); if (!uid) continue;
+      want['att_' + sid + '_' + rid] = { uid, name: (staff[sid] || {}).name || '', from: r.from, to: r.to || r.from, half: !!r.half, type: r.leaveType || 'leave', reason: r.reason || '', status: r.status === 'approved' ? 'approved' : r.status === 'rejected' ? 'rejected' : 'pending', src: 'att' };
+    }
+    const have = JS().leaveMirror || {}; const next = {};
+    for (const [id, v] of Object.entries(want)) { const h = JSON.stringify(v); next[id] = h; if (have[id] !== h) { await fs.collection('leaves').doc(id).set({ ...v, createdAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true }); log('leave mirror', id, v.status); } }
+    for (const id of Object.keys(have)) if (!next[id]) { await fs.collection('leaves').doc(id).delete().catch(() => { }); }
+    if (JSON.stringify(have) !== JSON.stringify(next)) await write('jobState/leaveMirror', next);
+  }
+}
+
 /* ---------------- main ---------------- */
 (async () => {
   try {
@@ -498,6 +536,7 @@ async function taskSocietyGeo() {
     await taskDueTomorrow();
     await taskWeeklyBackup();
     await taskSocietyGeo();
+    await taskBoard(e);
     await taskCleanup();
     await write('jobState/lastNotify', NOW);
     await write('jobState/lastRun', NOW);
