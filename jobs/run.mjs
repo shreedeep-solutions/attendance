@@ -490,6 +490,24 @@ async function taskSocietyGeo() {
 
 /* Office 2.4 — the team board (who is in, on leave, birthdays) for My Day and the office screen,
    leave asked in Attendance shown in Tasks too, and birthdays typed by staff copied to Attendance */
+/* Office 2.7.2: a person removed in Team (users/{uid}.disabled) cannot sign in anywhere —
+   their Firebase login is switched off and their open sessions ended; "Reactivate" switches it back on. */
+async function taskLogins() {
+  if (!db) return; let fs; try { fs = admin.firestore(); } catch (e) { return; }
+  let snap; try { snap = await fs.collection('users').get(); } catch (e) { log('logins', e.message); return; }
+  for (const d of snap.docs) {
+    const want = d.data().disabled === true;
+    try {
+      const u = await admin.auth().getUser(d.id);
+      if (!!u.disabled === want) continue;
+      if (DRY) { log('LOGIN', d.id, want ? 'switch off' : 'switch on'); continue; }
+      await admin.auth().updateUser(d.id, { disabled: want });
+      if (want) await admin.auth().revokeRefreshTokens(d.id);
+      log('login', d.id, want ? 'switched off (removed)' : 'switched on (reactivated)');
+    } catch (e) { if (e && e.code !== 'auth/user-not-found') log('logins', d.id, e.message); }
+  }
+}
+
 async function taskBoard(e) {
   if (!db || DRY) return;
   const staff = D.staff || {}; const act = Object.keys(staff).filter(s => staff[s].active !== false);
@@ -537,6 +555,7 @@ async function taskBoard(e) {
     await taskWeeklyBackup();
     await taskSocietyGeo();
     await taskBoard(e);
+    await taskLogins();
     await taskCleanup();
     await write('jobState/lastNotify', NOW);
     await write('jobState/lastRun', NOW);
